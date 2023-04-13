@@ -1,7 +1,7 @@
 use rand::seq::SliceRandom;
 use serenity::model::application::interaction::InteractionResponseType;
 use serenity::model::prelude::component::InputTextStyle;
-use sqlx::{Pool, Sqlite, query_file_unchecked};
+use sqlx::{query_file_unchecked, Pool, Sqlite};
 use std::any::Any;
 use std::cmp::min;
 use std::collections::HashMap;
@@ -172,9 +172,9 @@ async fn get_playlist_data(spotify: Arc<ClientCredsSpotify>, url: String) -> Pla
 async fn add_playlist_to_db(db: Pool<Sqlite>, playlist: Playlist, user: u64) {
     let user_string = user.to_string();
     sqlx::query!("INSERT INTO playlists (playlist_url, playlist_name, added_by, amount_songs) VALUES (?,?,?,?)",
-     playlist.playlist_name, 
-     playlist.playlist_url, 
-     user_string, 
+     playlist.playlist_name,
+     playlist.playlist_url,
+     user_string,
      playlist.amount_songs)
      .execute(&db)
      .await
@@ -189,8 +189,11 @@ async fn get_tracks(spotify: Arc<ClientCredsSpotify>, url: String) -> Vec<Song> 
     let mut offset = 0;
     let limit = 100;
     loop {
-        let pl = spotify.playlist_items_manual(playlist_id.clone(), None, None, Some(limit), Some(offset)).await.unwrap();
-        for track in pl.items{
+        let pl = spotify
+            .playlist_items_manual(playlist_id.clone(), None, None, Some(limit), Some(offset))
+            .await
+            .unwrap();
+        for track in pl.items {
             let full_track = match track.track {
                 Some(track) => track,
                 None => continue,
@@ -203,15 +206,19 @@ async fn get_tracks(spotify: Arc<ClientCredsSpotify>, url: String) -> Vec<Song> 
                 Some(_) => (),
                 None => continue,
             }
-            let artits_string = full_track.artists.iter().map(|artist| artist.name.to_string()).collect::<Vec<String>>().join(", ");
-            tracks.push(
-                Song::new(
-                    full_track.preview_url.unwrap(), 
-                    full_track.name,
-                    artits_string, 
-                    full_track.album.name, 
-                    full_track.external_urls.get("spotify").unwrap().to_string(),
-                ));
+            let artits_string = full_track
+                .artists
+                .iter()
+                .map(|artist| artist.name.to_string())
+                .collect::<Vec<String>>()
+                .join(", ");
+            tracks.push(Song::new(
+                full_track.preview_url.unwrap(),
+                full_track.name,
+                artits_string,
+                full_track.album.name,
+                full_track.external_urls.get("spotify").unwrap().to_string(),
+            ));
             // TODO: Make this safe
         }
         offset += limit;
@@ -230,11 +237,10 @@ fn validate_guess(guess: &str, track: &Song) -> bool {
     track_name = track_name.replace(" ", "");
     let mut artist_name = track.artist_name.to_lowercase();
     artist_name = artist_name.replace(" ", "");
-    if guess == track_name || guess == artist_name  {
+    if guess == track_name || guess == artist_name {
         return true;
     }
-    if levenstein_distance(&guess, &track_name) < 3
-        || levenstein_distance(&guess, &artist_name) < 3
+    if levenstein_distance(&guess, &track_name) < 3 || levenstein_distance(&guess, &artist_name) < 3
     {
         return true;
     }
@@ -373,7 +379,8 @@ async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
         let modal_playlist = get_playlist_data(
             data_read.get::<BotSpotCred>().unwrap().clone(),
             selected_playlist.clone(),
-        ).await;
+        )
+        .await;
         add_playlist_to_db(database, modal_playlist, msg.author.id.0).await;
     } else {
         let result = &interaction.data.values[0];
@@ -422,9 +429,10 @@ async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
     let mut tracks = get_tracks(
         data_read.get::<BotSpotCred>().unwrap().clone(),
         selected_playlist,
-    ).await;
+    )
+    .await;
     tracks.shuffle(&mut rand::thread_rng());
-    let mut round_counter: u32 = 1 ;
+    let mut round_counter: u32 = 1;
     let guild = msg.guild(&ctx.cache).unwrap();
     let guild_id = guild.id;
 
@@ -433,32 +441,35 @@ async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
         .expect("Songbird Voice client placed in at initialisation.")
         .clone();
 
-    for track in tracks.into_iter().take(quiz_length as usize){
+    for track in tracks.into_iter().take(quiz_length as usize) {
         let filter_track = track.clone();
-        channel.say(&ctx.http, format!("Round {}", round_counter)).await.unwrap();
+        channel
+            .say(&ctx.http, format!("Round {}", round_counter))
+            .await
+            .unwrap();
         if let Some(handler_lock) = manager.get(guild_id) {
             let mut handler = handler_lock.lock().await;
-    
+
             let source = match songbird::ytdl(&track.preview_url).await {
                 Ok(source) => source,
                 Err(why) => {
                     println!("Err starting source: {:?}", why);
-    
+
                     check_msg(msg.channel_id.say(&ctx.http, "Error sourcing ffmpeg").await);
-    
+
                     return Ok(());
                 }
             };
-    
+
             handler.play_source(source);
             println!("Playing: {} by {}", track.song_name, track.artist_name);
             let collector = MessageCollectorBuilder::new(ctx)
-            .channel_id(msg.channel_id)
-            .collect_limit(1u32)
-            .timeout(Duration::from_secs(30))
-            .filter(move |m| validate_guess(&m.content, &filter_track))
-            .build();
-    
+                .channel_id(msg.channel_id)
+                .collect_limit(1u32)
+                .timeout(Duration::from_secs(30))
+                .filter(move |m| validate_guess(&m.content, &filter_track))
+                .build();
+
             let collected: Vec<_> = collector.then(|msg| async move { msg }).collect().await;
             handler.stop();
             if collected.len() > 0 {
@@ -472,7 +483,12 @@ async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
                     participants.get(&winning_msg.author.id.0).unwrap() + 1,
                 );
             } else {
-                channel.say(&ctx.http, format!("Better luck next time!, the Song was: {} ", track.url)).await?;
+                channel
+                    .say(
+                        &ctx.http,
+                        format!("Better luck next time!, the Song was: {} ", track.url),
+                    )
+                    .await?;
             }
         }
         round_counter += 1;
