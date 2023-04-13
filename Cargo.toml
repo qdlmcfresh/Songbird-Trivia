@@ -1,0 +1,28 @@
+[package]
+name = "songbird-trivia"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+songbird = ">=0.3.2"
+tracing = ">=0.1"
+tracing-subscriber = ">=0.2"
+tracing-futures = ">=0.2"
+dotenv = "0.15.0"
+regex = "1.7.3"
+sqlx = { version = ">=0.6.2", features = ["runtime-tokio-native-tls", "sqlite", "chrono", "macros"]}
+rand = "0.8.5"
+
+[dependencies.serenity]
+version = ">=0.11.5"
+features = ["client", "standard_framework", "voice", "rustls_backend", "collector"]
+
+[dependencies.tokio]
+version = ">=1.27.0"
+features = ["macros", "rt-multi-thread", "signal"]
+
+[dependencies.rspotify]
+version = ">=0.11.6"
+features = ["dotenv", "env-file"]

@@ -1,0 +1,27 @@
+CREATE TABLE IF NOT EXISTS playlists
+(
+  id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+  playlist_url VARCHAR(255) NOT NULL,
+  playlist_name VARCHAR(255) NOT NULL,
+  amount_songs INTEGER NOT NULL,
+  added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_update TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  added_by VARCHAR(255) NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS game_results 
+(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    playlist_id INTEGER NOT NULL,
+    game_length INTEGER NOT NULL,
+    amount_songs INTEGER NOT NULL,
+    FOREIGN KEY (playlist_id) REFERENCES playlists(id)
+);
+
+CREATE TABLE IF NOT EXISTS game_rankings
+(
+    game_id INTEGER NOT NULL,
+    user_id VARCHAR(255) NOT NULL,
+    points INTEGER NOT NULL,
+    PRIMARY KEY (game_id, user_id)
+);
