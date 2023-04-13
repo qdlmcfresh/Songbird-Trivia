@@ -204,7 +204,15 @@ async fn get_tracks(spotify: Arc<ClientCredsSpotify>, url: String) -> Vec<Song> 
                 None => continue,
             }
             let artits_string = full_track.artists.iter().map(|artist| artist.name.to_string()).collect::<Vec<String>>().join(", ");
-            tracks.push(Song::new(full_track.preview_url.unwrap(), full_track.name,artits_string, full_track.album.name));
+            tracks.push(
+                Song::new(
+                    full_track.preview_url.unwrap(), 
+                    full_track.name,
+                    artits_string, 
+                    full_track.album.name, 
+                    full_track.external_urls.get("spotify").unwrap().to_string(),
+                ));
+            // TODO: Make this safe
         }
         offset += limit;
         if pl.next.is_none() {
@@ -361,6 +369,7 @@ async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
             })
             .await
             .unwrap();
+        //TODO: Validate that the URL is a valid Spotify Playlist
         let modal_playlist = get_playlist_data(
             data_read.get::<BotSpotCred>().unwrap().clone(),
             selected_playlist.clone(),
@@ -425,6 +434,7 @@ async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
         .clone();
 
     for track in tracks.into_iter().take(quiz_length as usize){
+        let filter_track = track.clone();
         channel.say(&ctx.http, format!("Round {}", round_counter)).await.unwrap();
         if let Some(handler_lock) = manager.get(guild_id) {
             let mut handler = handler_lock.lock().await;
@@ -446,8 +456,7 @@ async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
             .channel_id(msg.channel_id)
             .collect_limit(1u32)
             .timeout(Duration::from_secs(30))
-            .filter(move |m| validate_guess(&m.content, &track))
-            // Build the collector.
+            .filter(move |m| validate_guess(&m.content, &filter_track))
             .build();
     
             let collected: Vec<_> = collector.then(|msg| async move { msg }).collect().await;
@@ -463,7 +472,7 @@ async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
                     participants.get(&winning_msg.author.id.0).unwrap() + 1,
                 );
             } else {
-                channel.say(&ctx.http, "Better luck next time!").await?;
+                channel.say(&ctx.http, format!("Better luck next time!, the Song was: {} ", track.url)).await?;
             }
         }
         round_counter += 1;
@@ -478,6 +487,9 @@ async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
     }
     let message_string = score_message.build();
     channel.say(&ctx.http, &message_string).await?;
+    // TODO: Add Score to DB
+    // TODO: Add Skip Functionality
+    // TODO: Nicer Messages
     Ok(())
 }
 

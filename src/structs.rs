@@ -30,14 +30,16 @@ pub struct Song{
     pub song_name: String,
     pub artist_name: String,
     pub album_name: String,
+    pub url : String,
 }
 impl Song{
-    pub fn new(preview_url: String, song_name: String, artist_name: String, album_name: String) -> Self{
+    pub fn new(preview_url: String, song_name: String, artist_name: String, album_name: String, url: String) -> Self{
         Self{
             preview_url,
             song_name,
             artist_name,
             album_name,
+            url
         }
     }
 }
