@@ -1,9 +1,7 @@
 use rand::seq::SliceRandom;
 use serenity::model::application::interaction::InteractionResponseType;
 use serenity::model::prelude::component::InputTextStyle;
-use sqlx::{query_file_unchecked, Pool, Sqlite};
-use std::any::Any;
-use std::cmp::min;
+use sqlx::{Pool, Sqlite};
 use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
@@ -38,7 +36,7 @@ mod structs;
 use structs::*;
 
 use rspotify::{
-    model::{FullPlaylist, FullTrack, PlayableItem, PlaylistId},
+    model::{PlayableItem, PlaylistId},
     prelude::*,
     ClientCredsSpotify, Credentials,
 };
@@ -120,7 +118,9 @@ async fn main() {
             .map_err(|why| println!("Client ended: {:?}", why));
     });
 
-    tokio::signal::ctrl_c().await;
+    tokio::signal::ctrl_c()
+        .await
+        .expect("Failed to install CTRL+C signal handler");
     println!("Received Ctrl-C, shutting down.");
 }
 
@@ -266,6 +266,7 @@ fn validate_guess(guess: &str, track: &Song) -> bool {
 
 #[command]
 async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
+    // TODO: Check if Bot is in message authors voice channel and if not join it
     let quiz_length = match args.parse::<u32>() {
         Ok(quiz_length) => quiz_length,
         Err(_) => {
@@ -320,7 +321,7 @@ async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
         }
     };
     let interaction_result = &interaction.data.values[0];
-    let mut selected_playlist = String::new();
+    let mut selected_playlist: Option<String> = None;
 
     if interaction_result == "Add new" {
         interaction
@@ -365,7 +366,7 @@ async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
             _ => String::new(),
         };
         println!("Modal playlist: {:?}", modal_result);
-        selected_playlist = modal_result.clone();
+        selected_playlist = Some(modal_result.clone());
         modal_interaction
             .create_interaction_response(&ctx, |r| {
                 r.kind(InteractionResponseType::ChannelMessageWithSource)
@@ -378,14 +379,14 @@ async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
         //TODO: Validate that the URL is a valid Spotify Playlist
         let modal_playlist = get_playlist_data(
             data_read.get::<BotSpotCred>().unwrap().clone(),
-            selected_playlist.clone(),
+            modal_result.clone(),
         )
         .await;
         add_playlist_to_db(database, modal_playlist, msg.author.id.0).await;
     } else {
         let result = &interaction.data.values[0];
         println!("Selected playlist: {}", result);
-        selected_playlist = result.to_string();
+        selected_playlist = Some(result.to_string());
         interaction
             .create_interaction_response(&ctx, |r| {
                 r.kind(InteractionResponseType::ChannelMessageWithSource)
@@ -396,8 +397,8 @@ async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
             .await
             .unwrap();
     }
-
-    println!("Selected playlist: {}", selected_playlist);
+    let current_playlist = selected_playlist.unwrap();
+    println!("Selected playlist: {}", current_playlist);
 
     let join_message = MessageBuilder::new()
         .push_bold_line(format!("{} started a Quiz", author_nick.name))
@@ -428,7 +429,7 @@ async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
     }
     let mut tracks = get_tracks(
         data_read.get::<BotSpotCred>().unwrap().clone(),
-        selected_playlist,
+        current_playlist,
     )
     .await;
     tracks.shuffle(&mut rand::thread_rng());
