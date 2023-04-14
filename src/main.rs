@@ -1,9 +1,12 @@
 use rand::seq::SliceRandom;
 use serenity::model::application::interaction::InteractionResponseType;
 use serenity::model::prelude::component::InputTextStyle;
+use sqlx::sqlite::SqliteQueryResult;
 use sqlx::{Pool, Sqlite};
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::env;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -51,7 +54,7 @@ impl EventHandler for Handler {
 }
 
 #[group]
-#[commands(join, leave, quiz)]
+#[commands(join, leave, quiz, skip)]
 struct General;
 
 struct BotSpotCred;
@@ -62,6 +65,16 @@ impl TypeMapKey for BotSpotCred {
 struct BotDatabase;
 impl TypeMapKey for BotDatabase {
     type Value = Pool<Sqlite>;
+}
+
+struct BotSkipVotes;
+impl TypeMapKey for BotSkipVotes {
+    type Value = Arc<RwLock<HashSet<u64>>>;
+}
+
+struct BotParticipantCount;
+impl TypeMapKey for BotParticipantCount {
+    type Value = Arc<AtomicU8>;
 }
 
 #[tokio::main]
@@ -109,6 +122,8 @@ async fn main() {
         let mut data = client.data.write().await;
         data.insert::<BotSpotCred>(Arc::new(spotify));
         data.insert::<BotDatabase>(database);
+        data.insert::<BotSkipVotes>(Arc::new(RwLock::new(HashSet::new())));
+        data.insert::<BotParticipantCount>(Arc::new(AtomicU8::new(0)));
     }
 
     tokio::spawn(async move {
@@ -169,16 +184,19 @@ async fn get_playlist_data(spotify: Arc<ClientCredsSpotify>, url: String) -> Pla
     )
 }
 
-async fn add_playlist_to_db(db: Pool<Sqlite>, playlist: Playlist, user: u64) {
+async fn add_playlist_to_db(
+    db: &Pool<Sqlite>,
+    playlist: Playlist,
+    user: u64,
+) -> Result<SqliteQueryResult, sqlx::Error> {
     let user_string = user.to_string();
     sqlx::query!("INSERT INTO playlists (playlist_url, playlist_name, added_by, amount_songs) VALUES (?,?,?,?)",
      playlist.playlist_name,
      playlist.playlist_url,
      user_string,
      playlist.amount_songs)
-     .execute(&db)
+     .execute(db)
      .await
-     .unwrap();
 }
 
 async fn get_tracks(spotify: Arc<ClientCredsSpotify>, url: String) -> Vec<Song> {
@@ -264,27 +282,11 @@ fn validate_guess(guess: &str, track: &Song) -> bool {
 //     Ok(())
 // }
 
-#[command]
-async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
-    // TODO: Check if Bot is in message authors voice channel and if not join it
-    let quiz_length = match args.parse::<u32>() {
-        Ok(quiz_length) => quiz_length,
-        Err(_) => {
-            msg.channel_id
-                .say(&ctx, "Please provide a valid number")
-                .await?;
-            return Ok(());
-        }
-    };
-
-    let channel = msg.channel_id;
-    let author_nick = ctx.http.get_user(msg.author.id.0).await.unwrap();
-    let data_read = ctx.data.read().await;
-    let database = data_read.get::<BotDatabase>().unwrap().clone();
-    let playlists = sqlx::query_as!(Playlist, "SELECT * FROM playlists")
-        .fetch_all(&database)
-        .await
-        .unwrap();
+async fn send_playlist_message(
+    ctx: &Context,
+    channel: ChannelId,
+    playlists: Vec<Playlist>,
+) -> Result<Message, serenity::Error> {
     let playlist_message = channel
         .send_message(&ctx, |m| {
             m.content("Please select a playlist or add a new one")
@@ -306,8 +308,58 @@ async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
                     })
                 })
         })
-        .await
-        .unwrap();
+        .await;
+    playlist_message
+}
+
+async fn read_playlists_from_db(db: Pool<Sqlite>) -> Result<Vec<Playlist>, sqlx::Error> {
+    let playlists = sqlx::query_as!(Playlist, "SELECT * FROM playlists")
+        .fetch_all(&db)
+        .await;
+    playlists
+}
+const PLAYLIST_VALID_REGEX: &str =
+    r"^(https?://)?(www\.)?(open\.)?spotify\.com/playlist/[a-zA-Z0-9]+(\?.*)*$";
+fn validate_url(url: &String) -> bool {
+    regex::Regex::new(PLAYLIST_VALID_REGEX)
+        .unwrap()
+        .is_match(&url)
+}
+
+#[command]
+async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
+    // TODO: Check if Bot is in message authors voice channel and if not join it
+    let quiz_length = match args.parse::<u32>() {
+        Ok(quiz_length) => quiz_length,
+        Err(_) => {
+            msg.channel_id
+                .say(&ctx, "Please provide a valid number")
+                .await?;
+            return Ok(());
+        }
+    };
+    let channel = msg.channel_id;
+    let author_nick = ctx.http.get_user(msg.author.id.0).await.unwrap();
+    let data_read = ctx.data.read().await;
+    let database = data_read.get::<BotDatabase>().unwrap().clone();
+
+    let playlists = match read_playlists_from_db(database.clone()).await {
+        Ok(result) => result,
+        _ => {
+            channel
+                .say(ctx, "Reading Playlists from Database failed!")
+                .await?;
+            return Ok(());
+        }
+    };
+
+    let playlist_message = match send_playlist_message(ctx, channel, playlists).await {
+        Ok(message) => message,
+        _ => {
+            channel.say(ctx, "Something went wrong here!").await?;
+            return Ok(());
+        }
+    };
 
     let interaction = match playlist_message
         .await_component_interaction(&ctx)
@@ -320,10 +372,9 @@ async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
             return Ok(());
         }
     };
-    let interaction_result = &interaction.data.values[0];
-    let mut selected_playlist: Option<String> = None;
 
-    if interaction_result == "Add new" {
+    let interaction_result = &interaction.data.values[0];
+    let selected_playlist = if interaction_result == "Add new" {
         interaction
             .create_interaction_response(&ctx, |r| {
                 r.kind(InteractionResponseType::Modal)
@@ -346,7 +397,6 @@ async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
             })
             .await
             .unwrap();
-
         let modal_interaction = match playlist_message
             .await_modal_interaction(&ctx)
             .timeout(Duration::from_secs(60 * 3))
@@ -366,44 +416,66 @@ async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
             _ => String::new(),
         };
         println!("Modal playlist: {:?}", modal_result);
-        selected_playlist = Some(modal_result.clone());
-        modal_interaction
-            .create_interaction_response(&ctx, |r| {
-                r.kind(InteractionResponseType::ChannelMessageWithSource)
-                    .interaction_response_data(|f| {
-                        f.content(format!("You added {:?} ", modal_result))
-                    })
-            })
-            .await
-            .unwrap();
-        //TODO: Validate that the URL is a valid Spotify Playlist
+        if !validate_url(&modal_result) {
+            modal_interaction
+                .create_interaction_response(&ctx, |r| {
+                    r.kind(InteractionResponseType::ChannelMessageWithSource)
+                        .interaction_response_data(|f| {
+                            f.content("Please provide a valid Spotify-Playlist-Url")
+                        })
+                })
+                .await
+                .unwrap();
+            return Ok(());
+        }
         let modal_playlist = get_playlist_data(
             data_read.get::<BotSpotCred>().unwrap().clone(),
             modal_result.clone(),
         )
         .await;
-        add_playlist_to_db(database, modal_playlist, msg.author.id.0).await;
-    } else {
-        let result = &interaction.data.values[0];
-        println!("Selected playlist: {}", result);
-        selected_playlist = Some(result.to_string());
-        interaction
+        if add_playlist_to_db(&database, modal_playlist, msg.author.id.0)
+            .await
+            .is_err()
+        {
+            modal_interaction
+                .create_interaction_response(&ctx, |r| {
+                    r.kind(InteractionResponseType::ChannelMessageWithSource)
+                        .interaction_response_data(|f| f.content("Failed to add Playlist to DB!"))
+                })
+                .await
+                .unwrap();
+            return Ok(());
+        }
+        modal_interaction
             .create_interaction_response(&ctx, |r| {
                 r.kind(InteractionResponseType::ChannelMessageWithSource)
                     .interaction_response_data(|f| {
-                        f.content(format!("You selected {:?} ", selected_playlist))
+                        f.content(format!("You added {:?} ", modal_result.clone()))
                     })
             })
             .await
             .unwrap();
-    }
-    let current_playlist = selected_playlist.unwrap();
-    println!("Selected playlist: {}", current_playlist);
+        modal_result
+    } else {
+        let result = &interaction.data.values[0];
+        println!("Selected playlist: {}", result);
+        interaction
+            .create_interaction_response(&ctx, |r| {
+                r.kind(InteractionResponseType::ChannelMessageWithSource)
+                    .interaction_response_data(|f| f.content(format!("You selected {:?} ", result)))
+            })
+            .await
+            .unwrap();
+        result.to_string()
+    };
+
+    println!("Selected playlist: {}", selected_playlist);
 
     let join_message = MessageBuilder::new()
         .push_bold_line(format!("{} started a Quiz", author_nick.name))
         .push("React to this Message to join the Quiz")
         .build();
+
     let join_msg = channel.say(&ctx, join_message).await?;
 
     let mut reaction_collector = EventCollectorBuilder::new(ctx)
@@ -427,12 +499,25 @@ async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
             _ => {}
         }
     }
+    // Store number of participants for skip command
+    let participant_lock = {
+        let data_read = ctx.data.read().await;
+        data_read
+            .get::<BotParticipantCount>()
+            .expect("Expected SkipVotes")
+            .clone()
+    };
+
+    participant_lock.store(participants.len() as u8, Ordering::SeqCst);
+
     let mut tracks = get_tracks(
         data_read.get::<BotSpotCred>().unwrap().clone(),
-        current_playlist,
+        selected_playlist,
     )
     .await;
+
     tracks.shuffle(&mut rand::thread_rng());
+
     let mut round_counter: u32 = 1;
     let guild = msg.guild(&ctx.cache).unwrap();
     let guild_id = guild.id;
@@ -442,7 +527,22 @@ async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
         .expect("Songbird Voice client placed in at initialisation.")
         .clone();
 
+    let me = ctx.http.get_current_user().await.unwrap();
+
     for track in tracks.into_iter().take(quiz_length as usize) {
+        // Reset skip counter
+        let counter_lock = {
+            let data_read = ctx.data.read().await;
+            data_read
+                .get::<BotSkipVotes>()
+                .expect("Expected SkipVotes")
+                .clone()
+        };
+        {
+            let mut counter = counter_lock.write().await;
+            counter.clear();
+        }
+
         let filter_track = track.clone();
         channel
             .say(&ctx.http, format!("Round {}", round_counter))
@@ -468,21 +568,36 @@ async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
                 .channel_id(msg.channel_id)
                 .collect_limit(1u32)
                 .timeout(Duration::from_secs(30))
-                .filter(move |m| validate_guess(&m.content, &filter_track))
+                .filter(move |m| {
+                    // Check if Message is from Bot and includes 'skipping' to end early
+                    if m.author.id.0 == me.id.0 && m.content == "Skipping!" {
+                        return true;
+                    }
+                    validate_guess(&m.content, &filter_track)
+                })
                 .build();
 
             let collected: Vec<_> = collector.then(|msg| async move { msg }).collect().await;
             handler.stop();
             if collected.len() > 0 {
                 let winning_msg = collected.get(0).unwrap();
-                let author = &winning_msg.author.name;
-                let _ = winning_msg
-                    .reply(ctx, &format!("{} guessed it!", author))
-                    .await;
-                participants.insert(
-                    winning_msg.author.id.0,
-                    participants.get(&winning_msg.author.id.0).unwrap() + 1,
-                );
+                if !winning_msg.author.id.0 == me.id.0 {
+                    let author = &winning_msg.author.name;
+                    let _ = winning_msg
+                        .reply(ctx, &format!("{} guessed it!", author))
+                        .await;
+                    participants.insert(
+                        winning_msg.author.id.0,
+                        participants.get(&winning_msg.author.id.0).unwrap() + 1,
+                    );
+                } else {
+                    channel
+                        .say(
+                            &ctx.http,
+                            format!("Better luck next time!, the Song was: {} ", track.url),
+                        )
+                        .await?;
+                }
             } else {
                 channel
                     .say(
@@ -508,6 +623,38 @@ async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
     // TODO: Add Skip Functionality
     // TODO: Nicer Messages
     Ok(())
+}
+
+#[command]
+async fn skip(ctx: &Context, msg: &Message) -> CommandResult {
+    // TODO: validate that message author is part of the game
+    // TODO: validate that a game is currently in progress
+    let counter_lock = {
+        let data_read = ctx.data.read().await;
+        data_read
+            .get::<BotSkipVotes>()
+            .expect("Expected SkipVotes")
+            .clone()
+    };
+
+    let participant_lock = {
+        let data_read = ctx.data.read().await;
+        data_read
+            .get::<BotParticipantCount>()
+            .expect("Expected SkipVotes")
+            .clone()
+    };
+    let count = {
+        let mut counter = counter_lock.write().await;
+        counter.insert(msg.author.id.0);
+        counter.len()
+    };
+    println!("Skip Count: {}", count);
+    let participants = participant_lock.load(Ordering::Relaxed);
+    if count as f32 / participants as f32 >= 0.32 {
+        msg.channel_id.say(ctx, "Skipping!").await.unwrap();
+    }
+    return Ok(());
 }
 
 #[command]
