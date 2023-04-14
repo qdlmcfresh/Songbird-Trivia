@@ -165,7 +165,7 @@ fn get_id_from_url(url: &str) -> String {
         .to_string()
 }
 
-async fn get_playlist_data(spotify: Arc<ClientCredsSpotify>, url: String) -> Playlist {
+async fn get_playlist_data(spotify: &Arc<ClientCredsSpotify>, url: String) -> Playlist {
     let id_from_url = get_id_from_url(&url);
     spotify.auto_reauth().await.unwrap();
 
@@ -199,7 +199,7 @@ async fn add_playlist_to_db(
      .await
 }
 
-async fn get_tracks(spotify: Arc<ClientCredsSpotify>, url: String) -> Vec<Song> {
+async fn get_tracks(spotify: &Arc<ClientCredsSpotify>, url: String) -> Vec<Song> {
     spotify.auto_reauth().await.unwrap();
     let mut tracks = Vec::new();
     let id_from_url = get_id_from_url(&url);
@@ -340,9 +340,8 @@ async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
     };
     let channel = msg.channel_id;
     let author_nick = ctx.http.get_user(msg.author.id.0).await.unwrap();
-    let data_read = ctx.data.read().await;
-    let database = data_read.get::<BotDatabase>().unwrap().clone();
-
+    let database = { ctx.data.read().await.get::<BotDatabase>().unwrap().clone() };
+    let spotify = { ctx.data.read().await.get::<BotSpotCred>().unwrap().clone() };
     let playlists = match read_playlists_from_db(database.clone()).await {
         Ok(result) => result,
         _ => {
@@ -428,11 +427,7 @@ async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
                 .unwrap();
             return Ok(());
         }
-        let modal_playlist = get_playlist_data(
-            data_read.get::<BotSpotCred>().unwrap().clone(),
-            modal_result.clone(),
-        )
-        .await;
+        let modal_playlist = get_playlist_data(&spotify, modal_result.clone()).await;
         if add_playlist_to_db(&database, modal_playlist, msg.author.id.0)
             .await
             .is_err()
@@ -510,11 +505,7 @@ async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
 
     participant_lock.store(participants.len() as u8, Ordering::SeqCst);
 
-    let mut tracks = get_tracks(
-        data_read.get::<BotSpotCred>().unwrap().clone(),
-        selected_playlist,
-    )
-    .await;
+    let mut tracks = get_tracks(&spotify, selected_playlist).await;
 
     tracks.shuffle(&mut rand::thread_rng());
 
