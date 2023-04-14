@@ -1,26 +1,26 @@
 use rand::seq::SliceRandom;
-use serenity::model::application::interaction::InteractionResponseType;
-use serenity::model::prelude::component::InputTextStyle;
+use songbird::SerenityInit;
 use sqlx::sqlite::SqliteQueryResult;
 use sqlx::{Pool, Sqlite};
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::env;
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    collections::{HashMap, HashSet},
+    env,
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
-use songbird::SerenityInit;
-
-use serenity::client::Context;
-
-use serenity::collector::{EventCollectorBuilder, MessageCollectorBuilder};
-use serenity::futures::stream::StreamExt;
-use serenity::model::prelude::*;
-use serenity::prelude::*;
+use rspotify::{
+    model::{PlayableItem, PlaylistId},
+    prelude::*,
+    ClientCredsSpotify, Credentials,
+};
 use serenity::{
     async_trait,
-    client::{Client, EventHandler},
+    client::{Client, Context, EventHandler},
+    collector::{EventCollectorBuilder, MessageCollectorBuilder},
     framework::{
         standard::{
             macros::{command, group},
@@ -28,21 +28,25 @@ use serenity::{
         },
         StandardFramework,
     },
-    model::{application::component::ActionRowComponent::*, channel::Message, gateway::Ready},
-    prelude::GatewayIntents,
+    futures::stream::StreamExt,
+    model::{
+        application::{component::ActionRowComponent::*, interaction::InteractionResponseType},
+        channel::Message,
+        gateway::Ready,
+        prelude::component::InputTextStyle,
+        prelude::*,
+    },
+    prelude::*,
     utils::MessageBuilder,
     Result as SerenityResult,
 };
+
 extern crate dotenv;
 use dotenv::dotenv;
+
 mod structs;
 use structs::*;
 
-use rspotify::{
-    model::{PlayableItem, PlaylistId},
-    prelude::*,
-    ClientCredsSpotify, Credentials,
-};
 use sqlx::types::chrono::NaiveDateTime;
 struct Handler;
 
