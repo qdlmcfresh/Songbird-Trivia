@@ -89,6 +89,8 @@ async fn main() {
     dotenv().ok();
 
     let token = env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
+    let dbfile = env::var("DATABASE_URL").expect("Expected a DB file in the environment");
+    let dbfile_split = dbfile.split(":").collect::<Vec<&str>>()[1];
 
     let client_id = env::var("SPOTIFY_CLIENT_ID").expect("Expected a token in the environment");
     let client_secret =
@@ -100,7 +102,7 @@ async fn main() {
         .max_connections(5)
         .connect_with(
             sqlx::sqlite::SqliteConnectOptions::new()
-                .filename("database.sqlite")
+                .filename(dbfile_split)
                 .create_if_missing(true),
         )
         .await
@@ -202,6 +204,10 @@ async fn add_playlist_to_db(
      .execute(db)
      .await
 }
+
+// async fn add_scores_to_db(db: &Pool<Sqlite>,scores: &HashMap<u64, u16>) -> Result<SqliteQueryResult, sqlx::Error> {
+//     sqlx::query!("")
+// }
 
 async fn get_tracks(spotify: &Arc<ClientCredsSpotify>, url: String) -> Vec<Song> {
     spotify.auto_reauth().await.unwrap();
