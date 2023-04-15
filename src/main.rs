@@ -1,3 +1,4 @@
+use edit_distance::edit_distance;
 use rand::seq::SliceRandom;
 use songbird::SerenityInit;
 use sqlx::sqlite::SqliteQueryResult;
@@ -43,6 +44,8 @@ use serenity::{
 
 extern crate dotenv;
 use dotenv::dotenv;
+
+extern crate edit_distance;
 
 mod structs;
 use structs::*;
@@ -146,21 +149,9 @@ async fn main() {
 }
 
 fn levenstein_distance(s1: &str, s2: &str) -> usize {
-    let mut costs = vec![0; s2.len() + 1];
-    for (i, c1) in s1.chars().enumerate() {
-        costs[0] = i + 1;
-        let mut nw = i;
-        for (j, c2) in s2.chars().enumerate() {
-            let cj = std::cmp::min(
-                1 + std::cmp::min(costs[j], costs[j + 1]),
-                if c1 == c2 { nw } else { nw + 1 },
-            );
-            nw = costs[j + 1];
-            costs[j + 1] = cj;
-        }
-    }
-    costs[s2.len()]
+    edit_distance(s1, s2)
 }
+
 const PLAYLIST_ID_REGEX: &str = r"/playlist/(.+)\?";
 
 fn get_id_from_url(url: &str) -> String {
