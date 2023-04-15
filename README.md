@@ -27,10 +27,14 @@ This is an optional dependency. It allows Songbird to download an audio source f
 
 
 # Installation
+## Barebone
 1. Initialize the database `sqlx database setup`
 2. Create a `.env`file including the tokens from `.env.sample`
 3. `cargo run`
 
+## Docker
+1. Create a `.env`file including the tokens from `.env.sample`
+2. ` docker run --rm --env-file .env -v PATH_TO_DB_FOLDER:/project/db ghcr.io/qdlmcfresh/songbird-trivia:main`
 
 
 

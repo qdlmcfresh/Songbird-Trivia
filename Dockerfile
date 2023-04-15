@@ -12,4 +12,6 @@ RUN cargo install --path .
 RUN cargo clean
 RUN rm -rf '$HOME/.cargo/cache'
 RUN rm -rf target
+RUN rm -rf /usr/local/cargo/registry/
+RUN rm -rf /usr/local/rustup/
 CMD /project/run.sh
