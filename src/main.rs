@@ -1,5 +1,13 @@
 use edit_distance::edit_distance;
 use rand::seq::SliceRandom;
+use serenity::builder::{
+    CreateApplicationCommand, CreateButton, CreateEmbed, CreateInteractionResponse,
+    CreateInteractionResponseData, CreateMessage,
+};
+use serenity::model::prelude::component::ButtonStyle;
+use serenity::model::prelude::interaction::application_command::{
+    CommandData, CommandDataOption, CommandDataOptionValue,
+};
 use songbird::SerenityInit;
 use sqlx::sqlite::SqliteQueryResult;
 use sqlx::{Pool, Sqlite};
@@ -31,7 +39,13 @@ use serenity::{
     },
     futures::stream::StreamExt,
     model::{
-        application::{component::ActionRowComponent::*, interaction::InteractionResponseType},
+        application::{
+            component::ActionRowComponent::*,
+            interaction::{
+                application_command::ApplicationCommandInteraction, Interaction,
+                InteractionResponseType,
+            },
+        },
         channel::Message,
         gateway::Ready,
         prelude::component::InputTextStyle,
@@ -41,7 +55,6 @@ use serenity::{
     utils::MessageBuilder,
     Result as SerenityResult,
 };
-
 extern crate dotenv;
 use dotenv::dotenv;
 
@@ -55,8 +68,32 @@ struct Handler;
 
 #[async_trait]
 impl EventHandler for Handler {
-    async fn ready(&self, _: Context, ready: Ready) {
+    async fn ready(&self, ctx: Context, ready: Ready) {
         println!("{} is connected!", ready.user.name);
+        let guild_id = GuildId(
+            env::var("DISCORD_GUILD_ID")
+                .expect("Expected a DISCORD_GUILD_ID in environment")
+                .parse()
+                .expect("DISCORD_GUILD_ID must be an INTERGER"),
+        );
+        let commands = GuildId::set_application_commands(&guild_id, &ctx.http, |commands| {
+            commands.create_application_command(|command| register_quiz(command))
+        })
+        .await;
+        println!(
+            "I now have the following guild slash commands: {:#?}",
+            commands
+        );
+    }
+    async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
+        let command = match interaction {
+            Interaction::ApplicationCommand(command) => command,
+            _ => return,
+        };
+        match command.data.name.as_str() {
+            "quiz" => run_quiz(&ctx, &command).await,
+            _ => return,
+        };
     }
 }
 
@@ -82,6 +119,283 @@ impl TypeMapKey for BotSkipVotes {
 struct BotParticipantCount;
 impl TypeMapKey for BotParticipantCount {
     type Value = Arc<AtomicU8>;
+}
+
+fn register_quiz(command: &mut CreateApplicationCommand) -> &mut CreateApplicationCommand {
+    command
+        .name("quiz")
+        .description("Hier entsteht großes")
+        .create_option(|option| {
+            option
+                .name("quiz_length")
+                .description("Quiz length")
+                .description_localized("de", "Quizlaenge")
+                .kind(command::CommandOptionType::Integer)
+                .min_int_value(1)
+                .required(true)
+        })
+}
+
+fn create_join_response(
+    response: &mut CreateInteractionResponse,
+    interaction_type: InteractionResponseType,
+    players: &HashSet<User>,
+) {
+    response
+        .kind(interaction_type)
+        .interaction_response_data(|r| {
+            r.content("Click the green button to join the quiz!")
+                .components(|c| {
+                    c.create_action_row(|row| {
+                        row.add_button({
+                            let mut b = CreateButton::default();
+                            b.custom_id("join_button");
+                            b.label("✅ Join");
+                            b.style(ButtonStyle::Success);
+                            b
+                        });
+
+                        row.add_button({
+                            let mut b = CreateButton::default();
+                            b.custom_id("leave_button");
+                            b.label("❌ Leave");
+                            b.style(ButtonStyle::Danger);
+                            b
+                        })
+                    })
+                })
+                .add_embed({
+                    let mut e = CreateEmbed::default();
+                    e.color(0xff7c1e);
+                    e.title("Join the quiz!");
+                    e.description("Time remaining: `5` second(s)");
+                    let player_string = players
+                        .iter()
+                        .map(|x| x.to_string().clone())
+                        .collect::<Vec<String>>()
+                        .join("\n");
+                    e.field("Participants", player_string, false);
+                    e
+                })
+        });
+}
+
+async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction) {
+    let quiz_length_option = interaction
+        .data
+        .options
+        .get(0)
+        .expect("Expected an Option")
+        .resolved
+        .as_ref()
+        .expect("Expected int Object");
+
+    let quiz_length = match quiz_length_option {
+        CommandDataOptionValue::Integer(x) => *x as u8,
+        _ => return,
+    };
+    let channel = interaction.channel_id;
+    let database = { ctx.data.read().await.get::<BotDatabase>().unwrap().clone() };
+    let spotify = { ctx.data.read().await.get::<BotSpotCred>().unwrap().clone() };
+    let playlists = match read_playlists_from_db(database.clone()).await {
+        Ok(result) => result,
+        _ => {
+            check_msg(
+                channel
+                    .say(ctx, "Reading Playlists from Database failed!")
+                    .await,
+            );
+            return;
+        }
+    };
+
+    let mut players = HashSet::<User>::new();
+    let _asd = interaction
+        .create_interaction_response(&ctx.http, |f| {
+            create_join_response(
+                f,
+                InteractionResponseType::ChannelMessageWithSource,
+                &players,
+            );
+            f
+        })
+        .await;
+    let resp = interaction.get_interaction_response(ctx).await;
+    let message = match resp {
+        Ok(resp) => resp,
+        _ => {
+            check_msg(channel.say(ctx, "Something went wrong here!").await);
+            return;
+        }
+    };
+    let interactions = message.await_component_interactions(ctx);
+    let mut response_collector = interactions.timeout(Duration::from_secs(5)).build();
+    while let Some(event) = response_collector.next().await {
+        match event.data.custom_id.as_str() {
+            "join_button" => {
+                players.insert(event.user.clone());
+                let _e = event
+                    .create_interaction_response(ctx, |resp| {
+                        create_join_response(
+                            resp,
+                            InteractionResponseType::UpdateMessage,
+                            &players,
+                        );
+                        resp
+                    })
+                    .await;
+            }
+            "leave_button" => {
+                players.remove(&event.user);
+                let _e = event
+                    .create_interaction_response(ctx, |resp| {
+                        create_join_response(
+                            resp,
+                            InteractionResponseType::UpdateMessage,
+                            &players,
+                        );
+                        resp
+                    })
+                    .await;
+            }
+            _ => {}
+        }
+    }
+    let playlist_message = interaction
+        .create_followup_message(ctx, |f| {
+            f.content("Please select a playlist!");
+            f.ephemeral(true).components(|c| {
+                c.create_action_row(|row| {
+                    row.create_select_menu(|menu| {
+                        menu.custom_id("playlist_select");
+                        menu.placeholder("Select a playlist");
+                        menu.options(|f| {
+                            f.create_option(|o| o.label("Add new").value("Add new"));
+                            for playlist in playlists {
+                                f.create_option(|o| {
+                                    o.label(playlist.playlist_name).value(playlist.playlist_url)
+                                });
+                            }
+                            f
+                        })
+                    })
+                })
+            })
+        })
+        .await
+        .unwrap();
+    let playlist_interaction = match playlist_message
+        .await_component_interaction(&ctx)
+        .timeout(Duration::from_secs(60 * 3))
+        .await
+    {
+        Some(x) => x,
+        None => {
+            playlist_message.reply(&ctx, "Timed out").await.unwrap();
+            return;
+        }
+    };
+    let interaction_result = &playlist_interaction.data.values[0];
+    let selected_playlist = if interaction_result == "Add new" {
+        playlist_interaction
+            .create_interaction_response(&ctx, |r| {
+                r.kind(InteractionResponseType::Modal)
+                    .interaction_response_data(|d| {
+                        d.title("Add a new Playlist");
+                        d.custom_id("playlist_modal");
+                        d.content("Please enter a Spotify-Playlist URL")
+                            .components(|c| {
+                                c.create_action_row(|row| {
+                                    row.create_input_text(|f| {
+                                        f.custom_id("playlist_url");
+                                        f.placeholder("Enter a Spotify-Playlist URL");
+                                        f.style(InputTextStyle::Short);
+                                        f.min_length(10);
+                                        f.label("Playlist URL")
+                                    })
+                                })
+                            })
+                    })
+            })
+            .await
+            .unwrap();
+        let modal_interaction = match playlist_message
+            .await_modal_interaction(&ctx)
+            .timeout(Duration::from_secs(60 * 3))
+            .await
+        {
+            Some(x) => x,
+            None => {
+                playlist_message
+                    .reply(&ctx, "You took too long to select a playlist")
+                    .await
+                    .unwrap();
+                return;
+            }
+        };
+        let modal_result = match &modal_interaction.data.components[0].components[0] {
+            InputText(t) => t.value.clone(),
+            _ => String::new(),
+        };
+        println!("Modal playlist: {:?}", modal_result);
+        if !validate_url(&modal_result) {
+            modal_interaction
+                .create_interaction_response(&ctx, |r| {
+                    r.kind(InteractionResponseType::ChannelMessageWithSource)
+                        .interaction_response_data(|f| {
+                            f.content("Please provide a valid Spotify-Playlist-Url")
+                        })
+                })
+                .await
+                .unwrap();
+            return;
+        }
+        let modal_playlist = get_playlist_data(&spotify, modal_result.clone()).await;
+        if add_playlist_to_db(&database, modal_playlist, interaction.user.id.0)
+            .await
+            .is_err()
+        {
+            modal_interaction
+                .create_interaction_response(&ctx, |r| {
+                    r.kind(InteractionResponseType::ChannelMessageWithSource)
+                        .interaction_response_data(|f| {
+                            f.ephemeral(true).content("Failed to add Playlist to DB!")
+                        })
+                })
+                .await
+                .unwrap();
+            return;
+        }
+        modal_interaction
+            .create_interaction_response(&ctx, |r| {
+                r.kind(InteractionResponseType::ChannelMessageWithSource)
+                    .interaction_response_data(|f| {
+                        f.ephemeral(true)
+                            .content(format!("You added {:?} ", modal_result.clone()))
+                    })
+            })
+            .await
+            .unwrap();
+        modal_result
+    } else {
+        let result = &playlist_interaction.data.values[0];
+        playlist_interaction
+            .create_interaction_response(&ctx, |r| {
+                r.kind(InteractionResponseType::ChannelMessageWithSource)
+                    .interaction_response_data(|f| {
+                        f.content(format!(
+                            "{} chose:\n{}",
+                            interaction.user.to_string(),
+                            result
+                        ))
+                    })
+            })
+            .await
+            .unwrap();
+        result.to_string()
+    };
+    println!("Selected playlist: {}", selected_playlist);
+    // TODO: DER GANZE REST
 }
 
 #[tokio::main]
