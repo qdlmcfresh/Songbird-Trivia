@@ -16,7 +16,7 @@ use std::{
 use rspotify::{
     model::{PlayableItem, PlaylistId},
     prelude::*,
-    ClientCredsSpotify, Credentials,
+    ClientCredsSpotify, ClientError, Credentials,
 };
 use serenity::{
     async_trait,
@@ -200,7 +200,10 @@ async fn add_playlist_to_db(
 //     sqlx::query!("")
 // }
 
-async fn get_tracks(spotify: &Arc<ClientCredsSpotify>, url: String) -> Vec<Song> {
+async fn get_tracks(
+    spotify: &Arc<ClientCredsSpotify>,
+    url: String,
+) -> Result<Vec<Song>, ClientError> {
     spotify.auto_reauth().await.unwrap();
     let mut tracks = Vec::new();
     let id_from_url = get_id_from_url(&url);
@@ -210,8 +213,7 @@ async fn get_tracks(spotify: &Arc<ClientCredsSpotify>, url: String) -> Vec<Song>
     loop {
         let pl = spotify
             .playlist_items_manual(playlist_id.clone(), None, None, Some(limit), Some(offset))
-            .await
-            .unwrap();
+            .await?;
         for track in pl.items {
             let full_track = match track.track {
                 Some(track) => track,
@@ -245,7 +247,7 @@ async fn get_tracks(spotify: &Arc<ClientCredsSpotify>, url: String) -> Vec<Song>
             break;
         }
     }
-    tracks
+    Ok(tracks)
 }
 
 fn validate_guess(guess: &str, track: &Song) -> bool {
@@ -505,7 +507,16 @@ async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
     };
     participant_lock.store(participants.len() as u8, Ordering::SeqCst);
 
-    let mut tracks = get_tracks(&spotify, selected_playlist).await;
+    let mut tracks = match get_tracks(&spotify, selected_playlist).await {
+        Ok(t) => t,
+        _ => {
+            msg.channel_id
+                .say(&ctx, "Failed to fetch Songs from Spotify!")
+                .await?;
+            return Ok(());
+        }
+    };
+
     tracks.shuffle(&mut rand::thread_rng());
 
     let mut round_counter: u32 = 1;
