@@ -500,14 +500,12 @@ async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
         let data_read = ctx.data.read().await;
         data_read
             .get::<BotParticipantCount>()
-            .expect("Expected SkipVotes")
+            .expect("Expected BotParticipantCount")
             .clone()
     };
-
     participant_lock.store(participants.len() as u8, Ordering::SeqCst);
 
     let mut tracks = get_tracks(&spotify, selected_playlist).await;
-
     tracks.shuffle(&mut rand::thread_rng());
 
     let mut round_counter: u32 = 1;
