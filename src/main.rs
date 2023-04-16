@@ -556,6 +556,9 @@ async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
 
             handler.play_source(source);
             println!("Playing: {} by {}", track.song_name, track.artist_name);
+
+            let player_ids: Vec<u64> = participants.keys().map(|k| *k).collect();
+
             let collector = MessageCollectorBuilder::new(ctx)
                 .channel_id(msg.channel_id)
                 .collect_limit(1u32)
@@ -564,6 +567,9 @@ async fn quiz(ctx: &Context, msg: &Message, args: Args) -> CommandResult {
                     // Check if Message is from Bot and includes 'skipping' to end early
                     if m.author.id.0 == me.id.0 && m.content == "Skipping!" {
                         return true;
+                    }
+                    if !player_ids.contains(&m.author.id.0) {
+                        return false;
                     }
                     validate_guess(&m.content, &filter_track)
                 })
