@@ -668,8 +668,7 @@ async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction) {
                     return;
                 }
             };
-
-            handler.play_source(source);
+            handler.play_source(source).set_volume(0.5).unwrap();
             println!("Playing: {} by {}", track.song_name, track.artist_name);
             let user_arc = Arc::clone(&user_ids);
             let collector = MessageCollectorBuilder::new(ctx)
