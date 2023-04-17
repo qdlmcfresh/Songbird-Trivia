@@ -11,6 +11,7 @@ use serenity::model::prelude::interaction::application_command::{
 use songbird::SerenityInit;
 use sqlx::sqlite::SqliteQueryResult;
 use sqlx::{Pool, Sqlite};
+use std::future;
 use std::{
     collections::{HashMap, HashSet},
     env,
@@ -168,7 +169,6 @@ fn create_join_response(
                     let mut e = CreateEmbed::default();
                     e.color(0xff7c1e);
                     e.title("Join the quiz!");
-                    e.description("Time remaining: `5` second(s)");
                     let player_string = players
                         .iter()
                         .map(|x| x.to_string().clone())
@@ -178,6 +178,59 @@ fn create_join_response(
                     e
                 })
         });
+}
+
+async fn join_timer(
+    ctx: Context,
+    interaction: ApplicationCommandInteraction,
+    countdown_time: i8,
+    player_lock: Arc<RwLock<HashSet<User>>>,
+) {
+    let mut timer = tokio::time::interval(Duration::from_secs(1));
+    let mut count = countdown_time;
+    let mut message = interaction.get_interaction_response(&ctx).await.unwrap();
+    while count >= 0 {
+        timer.tick().await;
+        let players = player_lock.read().await;
+        message
+            .edit(&ctx, |r| {
+                r.content(format!("You have {} seconds to join!", count))
+                    .components(|c| {
+                        c.create_action_row(|row| {
+                            row.add_button({
+                                let mut b = CreateButton::default();
+                                b.custom_id("join_button");
+                                b.label("✅ Join");
+                                b.style(ButtonStyle::Success);
+                                b
+                            });
+
+                            row.add_button({
+                                let mut b = CreateButton::default();
+                                b.custom_id("leave_button");
+                                b.label("❌ Leave");
+                                b.style(ButtonStyle::Danger);
+                                b
+                            })
+                        })
+                    })
+                    .set_embed({
+                        let mut e = CreateEmbed::default();
+                        e.color(0xff7c1e);
+                        e.title("Join the quiz!");
+                        let player_string = players
+                            .iter()
+                            .map(|x| x.to_string().clone())
+                            .collect::<Vec<String>>()
+                            .join("\n");
+                        e.field("Participants", player_string, false);
+                        e
+                    })
+            })
+            .await
+            .unwrap();
+        count -= 1;
+    }
 }
 
 async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction) {
@@ -209,17 +262,18 @@ async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction) {
         }
     };
 
-    let mut players = HashSet::<User>::new();
-    let _asd = interaction
-        .create_interaction_response(&ctx.http, |f| {
-            create_join_response(
-                f,
-                InteractionResponseType::ChannelMessageWithSource,
-                &players,
-            );
-            f
-        })
-        .await;
+    let players = Arc::new(RwLock::new(HashSet::<User>::new()));
+    let countdown_time: i8 = 10;
+    {
+        let p = players.read().await;
+        let _asd = interaction
+            .create_interaction_response(&ctx.http, |f| {
+                create_join_response(f, InteractionResponseType::ChannelMessageWithSource, &p);
+                f
+            })
+            .await;
+    }
+
     let resp = interaction.get_interaction_response(ctx).await;
     let message = match resp {
         Ok(resp) => resp,
@@ -228,36 +282,44 @@ async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction) {
             return;
         }
     };
+    tokio::spawn(join_timer(
+        ctx.clone(),
+        interaction.clone(),
+        countdown_time,
+        Arc::clone(&players),
+    ));
+
     let interactions = message.await_component_interactions(ctx);
-    let mut response_collector = interactions.timeout(Duration::from_secs(5)).build();
+    let mut response_collector = interactions
+        .timeout(Duration::from_secs((countdown_time + 1) as u64))
+        .build();
     while let Some(event) = response_collector.next().await {
         match event.data.custom_id.as_str() {
             "join_button" => {
-                players.insert(event.user.clone());
+                {
+                    let mut p = players.write().await;
+                    p.insert(event.user.clone());
+                    println!("{:?}", p);
+                }
                 let _e = event
                     .create_interaction_response(ctx, |resp| {
-                        create_join_response(
-                            resp,
-                            InteractionResponseType::UpdateMessage,
-                            &players,
-                        );
-                        resp
+                        resp.kind(InteractionResponseType::UpdateMessage)
                     })
                     .await;
             }
             "leave_button" => {
-                players.remove(&event.user);
+                {
+                    let mut p = players.write().await;
+                    p.remove(&event.user);
+                    println!("{:?}", p);
+                }
                 let _e = event
                     .create_interaction_response(ctx, |resp| {
-                        create_join_response(
-                            resp,
-                            InteractionResponseType::UpdateMessage,
-                            &players,
-                        );
-                        resp
+                        resp.kind(InteractionResponseType::UpdateMessage)
                     })
                     .await;
             }
+
             _ => {}
         }
     }
