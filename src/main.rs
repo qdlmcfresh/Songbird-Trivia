@@ -683,7 +683,7 @@ async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction) {
                     if !user_arc.contains(&m.author.id.0) {
                         return false;
                     }
-                    validate_guess(&m.content, &filter_track)
+                    is_guess_correct(&m.content, &filter_track, 3)
                 })
                 .build();
 
@@ -806,7 +806,7 @@ async fn main() {
     println!("Received Ctrl-C, shutting down.");
 }
 
-fn levenstein_distance(s1: &str, s2: &str) -> usize {
+fn levenshtein_distance(s1: &str, s2: &str) -> usize {
     edit_distance(s1, s2)
 }
 
@@ -906,24 +906,56 @@ async fn get_tracks(
     }
     Ok(tracks)
 }
+fn is_guess_correct(guess: &str, track: &Song, threshold: usize) -> bool {
+    let track_title = &track.song_name.to_lowercase();
+    let invalid_chars = ['&', '#', '/', '\\', ':', '*', '?', '"', '<', '>', '|'];
+    let mut valid_title = track_title.as_str();
+    let guess = guess.to_lowercase();
 
-fn validate_guess(guess: &str, track: &Song) -> bool {
-    // TODO: Validate that guessing player is part of the game
-    let mut guess = guess.to_lowercase();
-    guess = guess.replace(" ", "");
-    let mut track_name = track.song_name.to_lowercase();
-    track_name = track_name.replace(" ", "");
-    let mut artist_name = track.artist_name.to_lowercase();
-    artist_name = artist_name.replace(" ", "");
-    if guess == track_name || guess == artist_name {
-        return true;
+    for keyword in ["feat.", "ft.", "remix", "edit"].iter() {
+        if let Some(idx) = track_title.find(keyword) {
+            valid_title = &track_title[..idx];
+            break;
+        }
     }
-    if levenstein_distance(&guess, &track_name) < 3 || levenstein_distance(&guess, &artist_name) < 3
-    {
-        return true;
+
+    let binding = valid_title
+        .chars()
+        .filter(|c| !invalid_chars.contains(c))
+        .collect::<String>();
+    valid_title = binding.as_str();
+    let guess = guess
+        .chars()
+        .filter(|c| !invalid_chars.contains(c))
+        .collect::<String>();
+
+    let dist = levenshtein_distance(&guess, valid_title);
+
+    if dist <= threshold {
+        true
+    } else {
+        false
     }
-    return false;
 }
+
+// fn validate_guess(guess: &str, track: &Song) -> bool {
+//     // TODO: Validate that guessing player is part of the game
+//     let mut guess = guess.to_lowercase();
+//     guess = guess.replace(" ", "");
+//     let mut track_name = track.song_name.to_lowercase();
+//     track_name = track_name.replace(" ", "");
+//     let mut artist_name = track.artist_name.to_lowercase();
+//     artist_name = artist_name.replace(" ", "");
+//     if guess == track_name || guess == artist_name {
+//         return true;
+//     }
+//     if levenshtein_distance(&guess, &track_name) < 3
+//         || levenshtein_distance(&guess, &artist_name) < 3
+//     {
+//         return true;
+//     }
+//     return false;
+// }
 
 // #[command]
 // async fn test(ctx: &Context, msg: &Message, _: Args) -> CommandResult {
