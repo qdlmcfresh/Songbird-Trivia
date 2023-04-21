@@ -11,6 +11,7 @@ use serenity::{
                 application_command::{ApplicationCommandInteraction, CommandDataOptionValue},
                 InteractionResponseType,
             },
+            ChannelId,
         },
         user::User,
     },
@@ -127,6 +128,73 @@ async fn join_timer(
             .unwrap();
         count -= 1;
     }
+}
+
+async fn check_for_title(ctx: Context, channel_id: ChannelId, song: Song) -> Result<User, ()> {
+    let message_collector = MessageCollectorBuilder::new(&ctx)
+        .channel_id(channel_id)
+        .filter(move |m| is_title_correct(&m.content, &song, 3))
+        .collect_limit(1)
+        .timeout(Duration::from_secs(30))
+        .build();
+    let collected: Vec<_> = message_collector
+        .then(|msg| async move { msg })
+        .collect()
+        .await;
+    if collected.is_empty() {
+        Err(())
+    } else {
+        let msg = collected.get(0).unwrap();
+        channel_id
+            .say(
+                &ctx,
+                format!("{} guessed the Title correctly!", msg.author.clone()),
+            )
+            .await
+            .unwrap();
+        Ok(msg.author.clone())
+    }
+}
+
+async fn check_for_author(ctx: Context, channel_id: ChannelId, song: Song) -> Result<User, ()> {
+    let message_collector = MessageCollectorBuilder::new(&ctx)
+        .channel_id(channel_id)
+        .filter(move |m| is_artist_correct(&m.content, &song, 3))
+        .collect_limit(1)
+        .timeout(Duration::from_secs(30))
+        .build();
+    let collected: Vec<_> = message_collector
+        .then(|msg| async move { msg })
+        .collect()
+        .await;
+    if collected.is_empty() {
+        Err(())
+    } else {
+        let msg = collected.get(0).unwrap();
+        channel_id
+            .say(
+                &ctx,
+                format!("{} guessed the Artist correctly!", msg.author.clone()),
+            )
+            .await
+            .unwrap();
+        Ok(msg.author.clone())
+    }
+}
+
+async fn get_winners(
+    ctx: &Context,
+    channel_id: ChannelId,
+    song: Song,
+) -> (Result<User, ()>, Result<User, ()>) {
+    let author_handle = tokio::spawn(check_for_author(ctx.clone(), channel_id, song.clone()));
+    let title_handle = tokio::spawn(check_for_title(ctx.clone(), channel_id, song.clone()));
+    while !author_handle.is_finished() && !title_handle.is_finished() {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let author = author_handle.await.unwrap();
+    let title = title_handle.await.unwrap();
+    (author, title)
 }
 
 pub fn register_quiz(command: &mut CreateApplicationCommand) -> &mut CreateApplicationCommand {
@@ -473,65 +541,26 @@ pub async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction
             };
             handler.play_source(source).set_volume(0.5).unwrap();
             println!("Playing: {} by {}", track.song_name, track.artist_name);
-            let user_arc = Arc::clone(&user_ids);
-            let collector = MessageCollectorBuilder::new(ctx)
-                .channel_id(interaction.channel_id)
-                .collect_limit(1u32)
-                .timeout(Duration::from_secs(30))
-                .filter(move |m| {
-                    // Check if Message is from Bot and includes 'skipping' to end early
-                    if m.author.id.0 == me.id.0 && m.content == "Skipping!" {
-                        return true;
-                    }
-                    if !user_arc.contains(&m.author.id.0) {
-                        return false;
-                    }
-                    is_guess_correct(&m.content, &filter_track, 3)
-                })
-                .build();
-
-            let collected: Vec<_> = collector.then(|msg| async move { msg }).collect().await;
-            handler.stop();
-            if collected.len() > 0 {
-                let winning_msg = collected.get(0).unwrap();
-                if !(winning_msg.author.id.0 == me.id.0) {
-                    println!("{} guessed it!", winning_msg.author.name);
-                    let _ = winning_msg
-                        .reply(
-                            ctx,
-                            &format!(
-                                "{} guessed it!\n{}",
-                                winning_msg.author.to_string(),
-                                track.url
-                            ),
-                        )
-                        .await;
-                    scores.insert(
-                        winning_msg.author.clone(),
-                        scores.get(&winning_msg.author).unwrap() + 1,
-                    );
-                } else {
-                    check_msg(
-                        channel
-                            .say(
-                                &ctx.http,
-                                format!("Better luck next time!, the Song was: {} ", track.url),
-                            )
-                            .await,
-                    );
+            let (author, title) = {
+                let res = get_winners(&ctx, interaction.channel_id.clone(), track.clone()).await;
+                (res.0, res.1)
+            };
+            match author {
+                Ok(author) => {
+                    scores.insert(author.clone(), scores.get(&author.clone()).unwrap() + 1);
                 }
-            } else {
-                check_msg(
-                    channel
-                        .say(
-                            &ctx.http,
-                            format!("Better luck next time!, the Song was: {} ", track.url),
-                        )
-                        .await,
-                );
+                Err(_) => {}
             }
+            match title {
+                Ok(title) => {
+                    scores.insert(title.clone(), scores.get(&title.clone()).unwrap() + 1);
+                }
+                Err(_) => {}
+            }
+            handler.stop();
+            round_counter += 1;
+            channel.say(&ctx, track.url).await.unwrap();
         }
-        round_counter += 1;
     }
     let mut score_message = MessageBuilder::new();
     score_message.push_bold_line("The Quiz is over! Here are the results:");
@@ -545,7 +574,8 @@ pub async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction
     leave_channel(&ctx, &interaction).await.unwrap();
 }
 
-fn is_guess_correct(guess: &str, track: &Song, threshold: usize) -> bool {
+fn is_title_correct(guess: &str, track: &Song, threshold: usize) -> bool {
+    // TODO: Split for (something)
     let track_title = &track.song_name.to_lowercase();
     let invalid_chars = ['&', '#', '/', '\\', ':', '*', '?', '"', '<', '>', '|'];
     let mut valid_title = track_title.as_str();
@@ -569,6 +599,30 @@ fn is_guess_correct(guess: &str, track: &Song, threshold: usize) -> bool {
         .collect::<String>();
 
     let dist = edit_distance(&guess, valid_title);
+
+    if dist <= threshold {
+        true
+    } else {
+        false
+    }
+}
+
+fn is_artist_correct(guess: &str, track: &Song, threshold: usize) -> bool {
+    // TODO: Maybe only check first artist
+    let invalid_chars = ['&', '#', '/', '\\', ':', '*', '?', '"', '<', '>', '|'];
+    let mut valid_name = &track.artist_name.to_lowercase();
+    let guess = guess.to_lowercase();
+
+    let binding = valid_name
+        .chars()
+        .filter(|c| !invalid_chars.contains(c))
+        .collect::<String>();
+    let guess = guess
+        .chars()
+        .filter(|c| !invalid_chars.contains(c))
+        .collect::<String>();
+
+    let dist = edit_distance(&guess, valid_name);
 
     if dist <= threshold {
         true
