@@ -19,6 +19,8 @@ use dotenv::dotenv;
 extern crate edit_distance;
 
 mod commands;
+mod database;
+mod spotify;
 mod structs;
 pub mod util;
 struct Handler;
