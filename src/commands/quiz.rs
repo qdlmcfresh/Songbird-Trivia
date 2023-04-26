@@ -1,5 +1,7 @@
 use rand::seq::SliceRandom;
+use regex::Regex;
 use serenity::{
+    async_trait,
     builder::{CreateApplicationCommand, CreateButton, CreateEmbed, CreateInteractionResponse},
     collector::MessageCollectorBuilder,
     futures::StreamExt,
@@ -11,20 +13,23 @@ use serenity::{
                 application_command::{ApplicationCommandInteraction, CommandDataOptionValue},
                 InteractionResponseType,
             },
+            ChannelId, Guild, ReactionType, UserId,
         },
         user::User,
     },
     prelude::{Context, RwLock},
     utils::MessageBuilder,
 };
+use songbird::{EventContext, EventHandler as VoiceEventHandler, TrackEvent};
 use std::{
     collections::{HashMap, HashSet},
     sync::{atomic::Ordering, Arc},
     time::Duration,
 };
+use tracing::info;
 
 use crate::{
-    structs::Song,
+    structs::{CollectionResult, Song},
     util::util::{
         add_playlist_to_db, check_msg, get_playlist_data, get_tracks, read_playlists_from_db,
         validate_url,
@@ -129,6 +134,146 @@ async fn join_timer(
     }
 }
 
+async fn check_for_title(
+    ctx: Context,
+    channel_id: ChannelId,
+    song: Song,
+    bot_user: UserId,
+    player_lock: Arc<RwLock<HashSet<User>>>,
+) -> Result<(User, CollectionResult), ()> {
+    let regex_parentheses: Regex = regex::Regex::new(r"\(.*\)").unwrap();
+    let regex_dash: Regex = regex::Regex::new(r"-.*").unwrap();
+    let regex_special_character: Regex = regex::Regex::new(r"[^0-9a-zA-Z\s]+").unwrap();
+    let regex_whitespace: Regex = regex::Regex::new(r"\s*").unwrap();
+
+    let mut song_title = regex_dash.replace_all(&song.song_name, "").to_string();
+    song_title = regex_parentheses.replace_all(&song_title, "").to_string();
+    song_title = regex_special_character
+        .replace_all(&song_title, "")
+        .to_string();
+    song_title = regex_whitespace.replace_all(&song_title, "").to_string();
+    song_title = song_title.to_lowercase();
+
+    let players = {
+        let players = player_lock.read().await;
+        players.clone()
+    };
+
+    let message_collector = MessageCollectorBuilder::new(&ctx)
+        .channel_id(channel_id)
+        .filter(move |m| {
+            if m.author.id == bot_user && m.content == "Skipping!" {
+                return true;
+            }
+            if !players.contains(&m.author) {
+                return false;
+            }
+            let mut guess = regex_dash.replace_all(&m.content, "").to_string();
+            guess = regex_parentheses.replace_all(&guess, "").to_string();
+            guess = regex_special_character.replace_all(&guess, "").to_string();
+            guess = regex_whitespace.replace_all(&guess, "").to_string();
+            guess = guess.to_lowercase();
+
+            is_title_correct(&guess, &song_title, 3)
+        })
+        .collect_limit(1)
+        .timeout(Duration::from_secs(29))
+        .build();
+    let collected: Vec<_> = message_collector
+        .then(|msg| async move { msg })
+        .collect()
+        .await;
+    if collected.is_empty() {
+        Err(())
+    } else {
+        let msg = collected.get(0).unwrap();
+        if msg.author.id == bot_user {
+            return Ok((msg.author.clone(), CollectionResult::Skip));
+        }
+        msg.react(&ctx, ReactionType::Unicode("🎶".to_string()))
+            .await
+            .unwrap();
+        Ok((msg.author.clone(), CollectionResult::Title))
+    }
+}
+
+async fn check_for_author(
+    ctx: Context,
+    channel_id: ChannelId,
+    song: Song,
+    bot_user: UserId,
+    player_lock: Arc<RwLock<HashSet<User>>>,
+) -> Result<(User, CollectionResult), ()> {
+    let players = {
+        let players = player_lock.read().await;
+        players.clone()
+    };
+
+    let message_collector = MessageCollectorBuilder::new(&ctx)
+        .channel_id(channel_id)
+        .filter(move |m| {
+            if m.author.id == bot_user && m.content == "Skipping!" {
+                return true;
+            }
+            if !players.contains(&m.author) {
+                return false;
+            }
+
+            is_artist_correct(&m.content, &song, 3)
+        })
+        .collect_limit(1)
+        .timeout(Duration::from_secs(29))
+        .build();
+    let collected: Vec<_> = message_collector
+        .then(|msg| async move { msg })
+        .collect()
+        .await;
+    if collected.is_empty() {
+        Err(())
+    } else {
+        let msg = collected.get(0).unwrap();
+        if msg.author.id == bot_user {
+            return Ok((msg.author.clone(), CollectionResult::Skip));
+        }
+        msg.react(&ctx, ReactionType::Unicode("🎙️".to_string()))
+            .await
+            .unwrap();
+        Ok((msg.author.clone(), CollectionResult::Artist))
+    }
+}
+
+async fn get_winners(
+    ctx: &Context,
+    channel_id: ChannelId,
+    song: Song,
+    players: Arc<RwLock<HashSet<User>>>,
+) -> (
+    Result<(User, CollectionResult), ()>,
+    Result<(User, CollectionResult), ()>,
+) {
+    let me = ctx.cache.current_user();
+    let artist_handle = tokio::spawn(check_for_author(
+        ctx.clone(),
+        channel_id,
+        song.clone(),
+        me.id,
+        players.clone(),
+    ));
+    let title_handle = tokio::spawn(check_for_title(
+        ctx.clone(),
+        channel_id,
+        song.clone(),
+        me.id,
+        players,
+    ));
+    while !artist_handle.is_finished() && !title_handle.is_finished() {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let author = artist_handle.await.unwrap();
+    let title = title_handle.await.unwrap();
+    (author, title)
+}
+
 pub fn register_quiz(command: &mut CreateApplicationCommand) -> &mut CreateApplicationCommand {
     command
         .name("quiz")
@@ -219,7 +364,7 @@ pub async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction
                 {
                     let mut p = players.write().await;
                     p.insert(event.user.clone());
-                    println!("{:?}", p);
+                    info!("{:?}", p);
                 }
                 let _e = event
                     .create_interaction_response(ctx, |resp| {
@@ -231,7 +376,7 @@ pub async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction
                 {
                     let mut p = players.write().await;
                     p.remove(&event.user);
-                    println!("{:?}", p);
+                    info!("{:?}", p);
                 }
                 let _e = event
                     .create_interaction_response(ctx, |resp| {
@@ -319,7 +464,7 @@ pub async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction
             InputText(t) => t.value.clone(),
             _ => String::new(),
         };
-        println!("Modal playlist: {:?}", modal_result);
+        info!("Modal playlist: {:?}", modal_result);
         if !validate_url(&modal_result) {
             modal_interaction
                 .create_interaction_response(&ctx, |r| {
@@ -376,7 +521,7 @@ pub async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction
             .unwrap();
         result.to_string()
     };
-    println!("Selected playlist: {}", selected_playlist);
+    info!("Selected playlist: {}", selected_playlist);
 
     // Store number of participants for skip command
     let participant_lock = {
@@ -417,8 +562,6 @@ pub async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction
         .expect("Songbird Voice client placed in at initialisation.")
         .clone();
 
-    let me = ctx.http.get_current_user().await.unwrap();
-
     let mut scores = HashMap::<User, u8>::new();
     {
         let players = players.read().await;
@@ -426,13 +569,6 @@ pub async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction
             scores.insert(player.clone(), 0);
         }
     }
-    let user_ids = Arc::new(
-        scores
-            .keys()
-            .cloned()
-            .map(|k| k.id.0)
-            .collect::<HashSet<u64>>(),
-    );
 
     for track in tracks.into_iter().take(quiz_length as usize) {
         // Reset skip counter
@@ -448,7 +584,6 @@ pub async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction
             counter.clear();
         }
 
-        let filter_track = track.clone();
         channel
             .say(&ctx.http, format!("Round {}", round_counter))
             .await
@@ -459,7 +594,7 @@ pub async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction
             let source = match songbird::ytdl(&track.preview_url).await {
                 Ok(source) => source,
                 Err(why) => {
-                    println!("Err starting source: {:?}", why);
+                    info!("Err starting source: {:?}", why);
 
                     check_msg(
                         interaction
@@ -472,66 +607,52 @@ pub async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction
                 }
             };
             handler.play_source(source).set_volume(0.5).unwrap();
-            println!("Playing: {} by {}", track.song_name, track.artist_name);
-            let user_arc = Arc::clone(&user_ids);
-            let collector = MessageCollectorBuilder::new(ctx)
-                .channel_id(interaction.channel_id)
-                .collect_limit(1u32)
-                .timeout(Duration::from_secs(30))
-                .filter(move |m| {
-                    // Check if Message is from Bot and includes 'skipping' to end early
-                    if m.author.id.0 == me.id.0 && m.content == "Skipping!" {
-                        return true;
+            info!("Playing: {} by {}", track.song_name, track.artist_name);
+            let (artist_result, title_result) = {
+                let res = get_winners(
+                    &ctx,
+                    interaction.channel_id.clone(),
+                    track.clone(),
+                    players.clone(),
+                )
+                .await;
+                (res.0, res.1)
+            };
+            match artist_result {
+                Ok(author) => {
+                    let (author_id, res) = author;
+                    match res {
+                        CollectionResult::Artist => {
+                            scores.insert(author_id.clone(), scores.get(&author_id).unwrap() + 1);
+                        }
+                        _ => {}
                     }
-                    if !user_arc.contains(&m.author.id.0) {
-                        return false;
+                }
+                Err(_) => {}
+            }
+            match title_result {
+                Ok(title) => {
+                    let (title, res) = title;
+                    match res {
+                        CollectionResult::Title => {
+                            scores.insert(title.clone(), scores.get(&title).unwrap() + 1);
+                        }
+                        _ => {}
                     }
-                    is_guess_correct(&m.content, &filter_track, 3)
-                })
+                }
+                Err(_) => {}
+            }
+            handler.stop();
+            round_counter += 1;
+
+            let trackmsg = MessageBuilder::new()
+                .push_bold_line(track.song_name)
+                .push_bold_line(track.artist_name)
+                .push_line(track.url)
                 .build();
 
-            let collected: Vec<_> = collector.then(|msg| async move { msg }).collect().await;
-            handler.stop();
-            if collected.len() > 0 {
-                let winning_msg = collected.get(0).unwrap();
-                if !(winning_msg.author.id.0 == me.id.0) {
-                    println!("{} guessed it!", winning_msg.author.name);
-                    let _ = winning_msg
-                        .reply(
-                            ctx,
-                            &format!(
-                                "{} guessed it!\n{}",
-                                winning_msg.author.to_string(),
-                                track.url
-                            ),
-                        )
-                        .await;
-                    scores.insert(
-                        winning_msg.author.clone(),
-                        scores.get(&winning_msg.author).unwrap() + 1,
-                    );
-                } else {
-                    check_msg(
-                        channel
-                            .say(
-                                &ctx.http,
-                                format!("Better luck next time!, the Song was: {} ", track.url),
-                            )
-                            .await,
-                    );
-                }
-            } else {
-                check_msg(
-                    channel
-                        .say(
-                            &ctx.http,
-                            format!("Better luck next time!, the Song was: {} ", track.url),
-                        )
-                        .await,
-                );
-            }
+            channel.say(&ctx, trackmsg).await.unwrap();
         }
-        round_counter += 1;
     }
     let mut score_message = MessageBuilder::new();
     score_message.push_bold_line("The Quiz is over! Here are the results:");
@@ -545,30 +666,34 @@ pub async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction
     leave_channel(&ctx, &interaction).await.unwrap();
 }
 
-fn is_guess_correct(guess: &str, track: &Song, threshold: usize) -> bool {
-    let track_title = &track.song_name.to_lowercase();
+fn is_title_correct(guess: &str, track: &String, threshold: usize) -> bool {
+    info!("Expecting Song-Title: {}", track);
+    let dist = edit_distance(&guess, track);
+
+    if dist <= threshold {
+        true
+    } else {
+        false
+    }
+}
+
+fn is_artist_correct(guess: &str, track: &Song, threshold: usize) -> bool {
+    // TODO: Maybe only check first artist
     let invalid_chars = ['&', '#', '/', '\\', ':', '*', '?', '"', '<', '>', '|'];
-    let mut valid_title = track_title.as_str();
+    let valid_name = &track.artist_name.to_lowercase();
     let guess = guess.to_lowercase();
 
-    for keyword in ["feat.", "ft.", "remix", "edit"].iter() {
-        if let Some(idx) = track_title.find(keyword) {
-            valid_title = &track_title[..idx];
-            break;
-        }
-    }
-
-    let binding = valid_title
+    let binding = valid_name
         .chars()
         .filter(|c| !invalid_chars.contains(c))
         .collect::<String>();
-    valid_title = binding.as_str();
     let guess = guess
         .chars()
         .filter(|c| !invalid_chars.contains(c))
         .collect::<String>();
+    info!("Expecting Artist: {}", &binding);
 
-    let dist = edit_distance(&guess, valid_title);
+    let dist = edit_distance(&guess, &binding.to_string());
 
     if dist <= threshold {
         true
@@ -613,7 +738,50 @@ async fn join_channel(
         .clone();
 
     let _handler = manager.join(guild.id, connect_to).await;
+
+    if let Some(handler_lock) = manager.get(guild.id) {
+        let mut handler = handler_lock.lock().await;
+
+        let source = match songbird::ytdl("youtube.com/watch?v=MFw3E6X5aoA").await {
+            Ok(source) => source,
+            Err(why) => {
+                info!("Err starting source: {:?}", why);
+
+                check_msg(
+                    interaction
+                        .channel_id
+                        .say(&ctx.http, "Error sourcing ffmpeg")
+                        .await,
+                );
+                return Ok(());
+            }
+        };
+        handler.play_source(source).set_volume(0.7).unwrap();
+    }
+
     return Ok(());
+}
+
+struct SongEndNotifier {
+    context: Context,
+    guild_id: Guild,
+}
+
+#[async_trait]
+impl VoiceEventHandler for SongEndNotifier {
+    async fn act(&self, ctx: &EventContext<'_>) -> Option<songbird::Event> {
+        if let EventContext::Track(_track_list) = ctx {
+            let manager = songbird::get(&self.context)
+                .await
+                .expect("Songbird Voice client placed in at initialisation.")
+                .clone();
+            let has_handler = manager.get(self.guild_id.id).is_some();
+            if has_handler {
+                manager.remove(self.guild_id.id).await.unwrap();
+            }
+        }
+        None
+    }
 }
 
 async fn leave_channel(
@@ -624,27 +792,40 @@ async fn leave_channel(
         Some(it) => it,
         None => return Err(()),
     };
+
     let manager = songbird::get(ctx)
         .await
         .expect("Songbird Voice client placed in at initialisation.")
         .clone();
-    let has_handler = manager.get(guild.id).is_some();
 
-    if has_handler {
-        if let Err(e) = manager.remove(guild.id).await {
-            check_msg(
-                interaction
-                    .channel_id
-                    .say(&ctx.http, format!("Failed: {:?}", e))
-                    .await,
-            );
-        }
-    } else {
-        check_msg(
-            interaction
-                .create_followup_message(ctx, |f| f.content("Not in a voice channel"))
-                .await,
-        );
+    if let Some(handler_lock) = manager.get(guild.id) {
+        let mut handler = handler_lock.lock().await;
+
+        let source = match songbird::ytdl("https://www.youtube.com/watch?v=dAqLGeXPKz4").await {
+            Ok(source) => source,
+            Err(why) => {
+                info!("Err starting source: {:?}", why);
+
+                check_msg(
+                    interaction
+                        .channel_id
+                        .say(&ctx.http, "Error sourcing ffmpeg")
+                        .await,
+                );
+                return Ok(());
+            }
+        };
+        let song = handler.play_source(source);
+        song.set_volume(1.0).unwrap();
+        song.add_event(
+            songbird::Event::Track(TrackEvent::End),
+            SongEndNotifier {
+                context: ctx.clone(),
+                guild_id: guild,
+            },
+        )
+        .unwrap();
     }
+
     Ok(())
 }
