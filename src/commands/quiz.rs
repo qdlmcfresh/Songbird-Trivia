@@ -21,6 +21,7 @@ use serenity::{
     utils::MessageBuilder,
 };
 use songbird::{EventContext, EventHandler as VoiceEventHandler, TrackEvent};
+use sqlx::types::chrono;
 use std::{
     collections::{HashMap, HashSet},
     sync::{atomic::Ordering, Arc},
@@ -29,11 +30,14 @@ use std::{
 use tracing::info;
 
 use crate::{
-    structs::{CollectionResult, Song},
-    util::util::{
-        add_playlist_to_db, check_msg, get_playlist_data, get_tracks, read_playlists_from_db,
-        validate_url,
+    database::{
+        game::{insert_game, Game, Score},
+        playlist::*,
+        song::{insert_songs, read_songs, Song},
     },
+    spotify::spotify_api::*,
+    structs::CollectionResult,
+    util::util::check_msg,
     BotDatabase, BotParticipantCount, BotSkipVotes, BotSpotCred,
 };
 use edit_distance::edit_distance;
@@ -290,6 +294,7 @@ pub fn register_quiz(command: &mut CreateApplicationCommand) -> &mut CreateAppli
 }
 
 pub async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction) {
+    let start_time = chrono::Utc::now().naive_utc();
     let quiz_length_option = interaction
         .data
         .options
@@ -315,7 +320,8 @@ pub async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction
     let channel = interaction.channel_id;
     let database = { ctx.data.read().await.get::<BotDatabase>().unwrap().clone() };
     let spotify = { ctx.data.read().await.get::<BotSpotCred>().unwrap().clone() };
-    let playlists = match read_playlists_from_db(database.clone()).await {
+
+    let playlists = match read_playlists(&database).await {
         Ok(result) => result,
         _ => {
             check_msg(
@@ -398,10 +404,8 @@ pub async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction
                         menu.placeholder("Select a playlist");
                         menu.options(|f| {
                             f.create_option(|o| o.label("Add new").value("Add new"));
-                            for playlist in playlists {
-                                f.create_option(|o| {
-                                    o.label(playlist.playlist_name).value(playlist.playlist_url)
-                                });
+                            for playlist in &playlists {
+                                f.create_option(|o| o.label(&playlist.name).value(&playlist.id));
                             }
                             f
                         })
@@ -477,35 +481,43 @@ pub async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction
                 .unwrap();
             return;
         }
-        let modal_playlist = get_playlist_data(&spotify, modal_result.clone()).await;
-        if add_playlist_to_db(&database, modal_playlist, interaction.user.id.0)
+        let mut modal_playlist = get_playlist_data(&spotify, modal_result.clone())
             .await
-            .is_err()
-        {
-            modal_interaction
-                .create_interaction_response(&ctx, |r| {
-                    r.kind(InteractionResponseType::ChannelMessageWithSource)
-                        .interaction_response_data(|f| {
-                            f.ephemeral(true).content("Failed to add Playlist to DB!")
-                        })
-                })
-                .await
-                .unwrap();
-            return;
-        }
+            .unwrap();
         modal_interaction
             .create_interaction_response(&ctx, |r| {
                 r.kind(InteractionResponseType::ChannelMessageWithSource)
                     .interaction_response_data(|f| {
                         f.ephemeral(true)
-                            .content(format!("You added {:?} ", modal_result.clone()))
+                            .content(format!("Trying to add {:?} ", modal_result.clone()))
                     })
             })
             .await
             .unwrap();
-        modal_result
+
+        // TODO: Send updating message with progress
+        let songs = get_tracks(&spotify, modal_playlist.spotify_id.clone())
+            .await
+            .unwrap();
+
+        insert_playlist(&database, &modal_playlist).await.unwrap();
+        modal_playlist.id = read_playlist_id(&database, &modal_playlist.spotify_id)
+            .await
+            .unwrap();
+
+        insert_songs(&database, &songs, modal_playlist.id)
+            .await
+            .unwrap();
+
+        modal_playlist.id
     } else {
         let result = &playlist_interaction.data.values[0];
+        let playlist_id = result.parse::<i64>().unwrap();
+        let playlist_url = playlists
+            .iter()
+            .find(|p| p.id == playlist_id)
+            .unwrap()
+            .get_url();
         playlist_interaction
             .create_interaction_response(&ctx, |r| {
                 r.kind(InteractionResponseType::ChannelMessageWithSource)
@@ -513,13 +525,13 @@ pub async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction
                         f.content(format!(
                             "{} chose:\n{}",
                             interaction.user.to_string(),
-                            result
+                            playlist_url
                         ))
                     })
             })
             .await
             .unwrap();
-        result.to_string()
+        playlist_id
     };
     info!("Selected playlist: {}", selected_playlist);
 
@@ -538,13 +550,13 @@ pub async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction
 
     participant_lock.store(player_count as u8, Ordering::SeqCst);
 
-    let mut tracks = match get_tracks(&spotify, selected_playlist).await {
+    let mut tracks = match read_songs(&database, selected_playlist).await {
         Ok(t) => t,
         _ => {
             check_msg(
                 interaction
                     .channel_id
-                    .say(&ctx, "Failed to fetch Songs from Spotify!")
+                    .say(&ctx, "Failed to fetch Songs from DB!")
                     .await,
             );
             return;
@@ -646,9 +658,9 @@ pub async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction
             round_counter += 1;
 
             let trackmsg = MessageBuilder::new()
-                .push_bold_line(track.song_name)
-                .push_bold_line(track.artist_name)
-                .push_line(track.url)
+                .push_bold_line(&track.song_name)
+                .push_bold_line(&track.artist_name)
+                .push_line(&track.get_url())
                 .build();
 
             channel.say(&ctx, trackmsg).await.unwrap();
@@ -664,6 +676,12 @@ pub async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction
     let message_string = score_message.build();
     check_msg(channel.say(&ctx.http, &message_string).await);
     leave_channel(&ctx, &interaction).await.unwrap();
+    let game = Game::new(0, selected_playlist, quiz_length as i64, start_time);
+    let mut score_vec = Vec::new();
+    for (user, score) in scores {
+        score_vec.push(Score::new(user.id.0 as i64, 0, score as i64));
+    }
+    insert_game(&database, &game, &score_vec).await.unwrap();
 }
 
 fn is_title_correct(guess: &str, track: &String, threshold: usize) -> bool {
