@@ -24,6 +24,12 @@ impl Song {
             preview_url,
         }
     }
+    pub fn get_url(&self) -> String {
+        format!(
+            "https://open.spotify.com/track/{}",
+            self.spotify_id.split(":").last().unwrap()
+        )
+    }
 }
 
 pub async fn read_songs(pool: &SqlitePool, playlist_id: i64) -> Result<Vec<Song>, sqlx::Error> {

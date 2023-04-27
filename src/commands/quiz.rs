@@ -21,6 +21,7 @@ use serenity::{
     utils::MessageBuilder,
 };
 use songbird::{EventContext, EventHandler as VoiceEventHandler, TrackEvent};
+use sqlx::types::chrono;
 use std::{
     collections::{HashMap, HashSet},
     sync::{atomic::Ordering, Arc},
@@ -30,6 +31,7 @@ use tracing::info;
 
 use crate::{
     database::{
+        game::{insert_game, Game, Score},
         playlist::*,
         song::{insert_songs, read_songs, Song},
     },
@@ -292,6 +294,7 @@ pub fn register_quiz(command: &mut CreateApplicationCommand) -> &mut CreateAppli
 }
 
 pub async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction) {
+    let start_time = chrono::Utc::now().naive_utc();
     let quiz_length_option = interaction
         .data
         .options
@@ -401,7 +404,7 @@ pub async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction
                         menu.placeholder("Select a playlist");
                         menu.options(|f| {
                             f.create_option(|o| o.label("Add new").value("Add new"));
-                            for playlist in playlists {
+                            for playlist in &playlists {
                                 f.create_option(|o| o.label(&playlist.name).value(&playlist.id));
                             }
                             f
@@ -509,6 +512,12 @@ pub async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction
         modal_playlist.id
     } else {
         let result = &playlist_interaction.data.values[0];
+        let playlist_id = result.parse::<i64>().unwrap();
+        let playlist_url = playlists
+            .iter()
+            .find(|p| p.id == playlist_id)
+            .unwrap()
+            .get_url();
         playlist_interaction
             .create_interaction_response(&ctx, |r| {
                 r.kind(InteractionResponseType::ChannelMessageWithSource)
@@ -516,13 +525,13 @@ pub async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction
                         f.content(format!(
                             "{} chose:\n{}",
                             interaction.user.to_string(),
-                            result
+                            playlist_url
                         ))
                     })
             })
             .await
             .unwrap();
-        result.parse::<i64>().unwrap()
+        playlist_id
     };
     info!("Selected playlist: {}", selected_playlist);
 
@@ -649,9 +658,9 @@ pub async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction
             round_counter += 1;
 
             let trackmsg = MessageBuilder::new()
-                .push_bold_line(track.song_name)
-                .push_bold_line(track.artist_name)
-                .push_line(track.preview_url)
+                .push_bold_line(&track.song_name)
+                .push_bold_line(&track.artist_name)
+                .push_line(&track.get_url())
                 .build();
 
             channel.say(&ctx, trackmsg).await.unwrap();
@@ -667,7 +676,12 @@ pub async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction
     let message_string = score_message.build();
     check_msg(channel.say(&ctx.http, &message_string).await);
     leave_channel(&ctx, &interaction).await.unwrap();
-    // TODO: Add scores to DB
+    let game = Game::new(0, selected_playlist, quiz_length as i64, start_time);
+    let mut score_vec = Vec::new();
+    for (user, score) in scores {
+        score_vec.push(Score::new(0, user.id.0 as i64, score as i64));
+    }
+    insert_game(&database, &game, &score_vec).await.unwrap();
 }
 
 fn is_title_correct(guess: &str, track: &String, threshold: usize) -> bool {

@@ -23,6 +23,12 @@ impl Playlist {
             last_update,
         }
     }
+    pub fn get_url(&self) -> String {
+        format!(
+            "https://open.spotify.com/playlist/{}",
+            self.spotify_id.split(":").last().unwrap()
+        )
+    }
 }
 
 pub async fn insert_playlist(pool: &SqlitePool, playlist: &Playlist) -> Result<(), sqlx::Error> {

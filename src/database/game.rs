@@ -1,3 +1,5 @@
+use sqlx::{types::chrono, SqlitePool};
+
 #[derive(sqlx::FromRow, Debug)]
 pub struct Game {
     pub id: i64,
