@@ -679,7 +679,7 @@ pub async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction
     let game = Game::new(0, selected_playlist, quiz_length as i64, start_time);
     let mut score_vec = Vec::new();
     for (user, score) in scores {
-        score_vec.push(Score::new(0, user.id.0 as i64, score as i64));
+        score_vec.push(Score::new(user.id.0 as i64, 0, score as i64));
     }
     insert_game(&database, &game, &score_vec).await.unwrap();
 }

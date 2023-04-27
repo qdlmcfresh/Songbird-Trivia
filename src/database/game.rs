@@ -83,3 +83,19 @@ pub async fn insert_game(
 
     Ok(())
 }
+
+pub async fn read_leaderboard(pool: &SqlitePool) -> Result<Vec<(u64, i32)>, sqlx::Error> {
+    let leaderboard = sqlx::query!(
+        "SELECT player_id, SUM(score) as total_score
+    FROM scores
+    GROUP BY player_id;"
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    let leaderboard_vec = leaderboard
+        .iter()
+        .map(|score| (score.player_id as u64, score.total_score.unwrap_or(0)))
+        .collect::<Vec<_>>();
+    Ok(leaderboard_vec)
+}

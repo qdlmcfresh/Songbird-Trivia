@@ -1,4 +1,6 @@
 use rspotify::{ClientCredsSpotify, Credentials};
+use serenity::collector::ComponentInteractionCollectorBuilder;
+use serenity::futures::StreamExt;
 use serenity::{
     async_trait,
     client::{Client, Context, EventHandler},
@@ -28,6 +30,7 @@ struct Handler;
 #[async_trait]
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
+        let ctx1 = Arc::new(ctx.clone());
         println!("{} is connected!", ready.user.name);
         let guild_id = GuildId(
             env::var("DISCORD_GUILD_ID")
@@ -35,15 +38,22 @@ impl EventHandler for Handler {
                 .parse()
                 .expect("DISCORD_GUILD_ID must be an INTERGER"),
         );
-        let commands = GuildId::set_application_commands(&guild_id, &ctx.http, |commands| {
+        let _commands = GuildId::set_application_commands(&guild_id, &ctx.http, |commands| {
             commands.create_application_command(|command| commands::quiz::register_quiz(command));
-            commands.create_application_command(|command| commands::skip::register_skip(command))
+            commands.create_application_command(|command| commands::skip::register_skip(command));
+            commands.create_application_command(|command| commands::score::register_score(command))
         })
         .await;
-        println!(
-            "I now have the following guild slash commands: {:#?}",
-            commands
-        );
+        // Thread to wait for refresh button interactions
+        tokio::spawn(async move {
+            let mut comp_int = ComponentInteractionCollectorBuilder::new(&*ctx1)
+                .filter(move |i| i.data.custom_id == "refresh")
+                .build();
+            while let Some(event) = comp_int.next().await {
+                println!("refreshing");
+                commands::score::refresh(&ctx1, event).await;
+            }
+        });
     }
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         let command = match interaction {
@@ -53,6 +63,7 @@ impl EventHandler for Handler {
         match command.data.name.as_str() {
             "quiz" => commands::quiz::run_quiz(&ctx, &command).await,
             "skip" => commands::skip::run_skip(&ctx, &command).await,
+            "score" => commands::score::run_score(&ctx, &command).await,
             _ => return,
         };
     }
