@@ -49,12 +49,10 @@ pub async fn read_songs(pool: &SqlitePool, playlist_id: i64) -> Result<Vec<Song>
 }
 
 pub async fn insert_songs(
-    pool: &SqlitePool,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     songs: &Vec<Song>,
     playlist_id: i64,
 ) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
-
     for song in songs {
         println!("{:?}\n{}", song, playlist_id);
         sqlx::query!(
@@ -71,10 +69,9 @@ pub async fn insert_songs(
             playlist_id,
             song.spotify_id
         )
-        .execute(&mut tx)
+        .execute(&mut *tx)
         .await
         .unwrap();
     }
-    tx.commit().await?;
     Ok(())
 }

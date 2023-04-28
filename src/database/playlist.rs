@@ -31,7 +31,10 @@ impl Playlist {
     }
 }
 
-pub async fn insert_playlist(pool: &SqlitePool, playlist: &Playlist) -> Result<(), sqlx::Error> {
+pub async fn insert_playlist(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    playlist: &Playlist,
+) -> Result<(), sqlx::Error> {
     sqlx::query!(
         r#"
         INSERT INTO playlists (spotify_id, name, amount_songs)
@@ -41,7 +44,7 @@ pub async fn insert_playlist(pool: &SqlitePool, playlist: &Playlist) -> Result<(
         playlist.name,
         playlist.amount_songs
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
     Ok(())
 }
@@ -59,14 +62,17 @@ pub async fn read_playlists(pool: &SqlitePool) -> Result<Vec<Playlist>, sqlx::Er
     Ok(playlists)
 }
 
-pub async fn read_playlist_id(pool: &SqlitePool, spotify_id: &str) -> Result<i64, sqlx::Error> {
+pub async fn read_playlist_id(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    spotify_id: &str,
+) -> Result<i64, sqlx::Error> {
     let playlist_id = sqlx::query!(
         r#"
         SELECT id FROM playlists WHERE spotify_id = ?
         "#,
         spotify_id
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
     Ok(playlist_id.id)
 }
