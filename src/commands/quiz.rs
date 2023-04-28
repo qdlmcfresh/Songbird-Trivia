@@ -499,15 +499,15 @@ pub async fn run_quiz(ctx: &Context, interaction: &ApplicationCommandInteraction
         let songs = get_tracks(&spotify, modal_playlist.spotify_id.clone())
             .await
             .unwrap();
-
-        insert_playlist(&database, &modal_playlist).await.unwrap();
-        modal_playlist.id = read_playlist_id(&database, &modal_playlist.spotify_id)
+        let mut tx = database.begin().await.unwrap();
+        insert_playlist(&mut tx, &modal_playlist).await.unwrap();
+        modal_playlist.id = read_playlist_id(&mut tx, &modal_playlist.spotify_id)
             .await
             .unwrap();
-
-        insert_songs(&database, &songs, modal_playlist.id)
+        insert_songs(&mut tx, &songs, modal_playlist.id)
             .await
             .unwrap();
+        tx.commit().await.unwrap();
 
         modal_playlist.id
     } else {

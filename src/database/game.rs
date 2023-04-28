@@ -66,7 +66,7 @@ pub async fn insert_game(
     .fetch_one(pool)
     .await?
     .id;
-
+    let mut transaction = pool.begin().await?;
     for score in scores {
         sqlx::query!(
             r#"
@@ -77,10 +77,10 @@ pub async fn insert_game(
             game_id,
             score.score
         )
-        .execute(pool)
+        .execute(&mut transaction)
         .await?;
     }
-
+    transaction.commit().await.unwrap();
     Ok(())
 }
 

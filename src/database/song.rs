@@ -49,61 +49,29 @@ pub async fn read_songs(pool: &SqlitePool, playlist_id: i64) -> Result<Vec<Song>
 }
 
 pub async fn insert_songs(
-    pool: &SqlitePool,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     songs: &Vec<Song>,
     playlist_id: i64,
 ) -> Result<(), sqlx::Error> {
     for song in songs {
-        match sqlx::query!(
+        println!("{:?}\n{}", song, playlist_id);
+        sqlx::query!(
             r#"
-            INSERT INTO songs (spotify_id, song_name, artist_name, preview_url)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT (spotify_id) DO NOTHING
+            INSERT OR IGNORE INTO songs (spotify_id, song_name, artist_name, preview_url)
+            VALUES(?, ?, ?, ?);
+            INSERT OR IGNORE INTO playlist_songs(playlist_id, song_id)
+            VALUES(?, (SELECT id FROM songs WHERE spotify_id = ?));
             "#,
             song.spotify_id,
             song.song_name,
             song.artist_name,
             song.preview_url,
-        )
-        .execute(pool)
-        .await
-        {
-            Ok(_) => {}
-            Err(e) => {
-                println!("Error adding Song {}\n {}", song.spotify_id, e.to_string())
-            }
-        }
-        let song_id = sqlx::query!(
-            r#"
-            SELECT id FROM songs WHERE spotify_id = ?
-            "#,
+            playlist_id,
             song.spotify_id
         )
-        .fetch_one(pool)
-        .await?
-        .id;
-
-        match sqlx::query!(
-            r#"
-            INSERT INTO playlist_songs (playlist_id, song_id)
-            VALUES (?, ?)
-            "#,
-            playlist_id,
-            song_id
-        )
-        .execute(pool)
+        .execute(&mut *tx)
         .await
-        {
-            Ok(_) => {}
-            Err(e) => {
-                println!(
-                    "Song {} in Playlist {} already exists \n {}",
-                    song.id,
-                    playlist_id,
-                    e.to_string()
-                )
-            }
-        }
+        .unwrap();
     }
     Ok(())
 }
