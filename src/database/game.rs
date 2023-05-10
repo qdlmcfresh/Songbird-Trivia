@@ -88,7 +88,8 @@ pub async fn read_leaderboard(pool: &SqlitePool) -> Result<Vec<(u64, i32)>, sqlx
     let leaderboard = sqlx::query!(
         r#"SELECT player_id, SUM(score) as "total_score!:i32"
     FROM scores
-    GROUP BY player_id;"#,
+    GROUP BY player_id
+    ORDER BY "total_score!:i32" DESC;"#,
     )
     .fetch_all(pool)
     .await
