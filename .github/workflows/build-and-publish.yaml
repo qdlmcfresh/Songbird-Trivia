@@ -8,7 +8,7 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
   TMP_LOCAL_IMAGE: localhost:5000/qdlmcfresh/songbird-trivia
-  REGISTRY_IMAGE: qdlmcfresh/Songbird-Trivia
+  REGISTRY_IMAGE: qdlmcfresh/songbird-trivia
   REGISTRY_TAG: latest
 
 jobs:
