@@ -55,6 +55,9 @@ jobs:
   
   push:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     needs:
       - build
     services:
