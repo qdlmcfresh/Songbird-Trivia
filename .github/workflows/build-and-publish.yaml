@@ -1,4 +1,4 @@
-name: Build and Push Docker Image - Test
+name: Create and publish a Docker image
 
 on:
   push:
@@ -9,32 +9,30 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  build-and-push-image:
+  build:
     runs-on: ubuntu-latest
+    matrix:
+      platform:
+        - linux/amd64
+        - linux/arm/v7
+        - linux/arm64
     permissions:
       contents: read
       packages: write
 
-    strategy:
-      matrix:
-        platform: [linux/amd64, linux/arm/v7, linux/arm64/v8]
-
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
+      -
+        name: Prepare
+        run: |
+          mkdir -p /tmp/images
+          platform=${{ matrix.platform }}
+          echo "TARFILE=${platform//\//-}.tar" >> $GITHUB_ENV
+          echo "TAG=${{ env.TMP_LOCAL_IMAGE }}:${platform//\//-}" >> $GITHUB_ENV
 
-      - name: Log in to the Container registry
-        uses: docker/login-action@v2
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata (tags, labels) for Docker
-        id: meta
-        uses: docker/metadata-action@v4
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
 
       - uses: docker/setup-buildx-action@v2
 
@@ -43,7 +41,60 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.platform }}-${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          platforms: ${{ matrix.platform }}
+          tags: ${{ env.TAG }}
+          outputs: type=docker,dest=/tmp/images/${{ env.TARFILE }}
+          #cache-from: type=gha
+          #cache-to: type=gha,mode=max
+        
+      -
+        name: Upload image
+        uses: actions/upload-artifact@v3
+        with:
+          name: images
+          path: /tmp/images/${{ env.TARFILE }}
+          if-no-files-found: error
+          retention-days: 1
+  
+  push:
+    runs-on: ubuntu-latest
+      needs:
+        - build
+      services:
+        registry:
+          image: registry:2
+          ports:
+            - 5000:5000
+      steps:
+        -
+          name: Download images
+          uses: actions/download-artifact@v3
+          with:
+            name: images
+            path: /tmp/images
+        -
+          name: Load images
+          run: |
+            for image in /tmp/images/*.tar; do
+              docker load -i $image
+            done
+        -
+          name: Push images to local registry
+          run: |
+            docker push -a ${{ env.TMP_LOCAL_IMAGE }}
+        -
+          name: Log in to the Container registry
+          uses: docker/login-action@v2
+          with:
+            registry: ${{ env.REGISTRY }}
+            username: ${{ github.actor }}
+            password: ${{ secrets.GITHUB_TOKEN }}
+        -
+          name: Create manifest list and push
+          run: |
+            docker buildx imagetools create -t ${{ env.REGISTRY_IMAGE }}:${{ env.REGISTRY_TAG }} \
+              $(docker image ls --format '{{.Repository}}:{{.Tag}}' '${{ env.TMP_LOCAL_IMAGE }}' | tr '\n' ' ')
+        -
+          name: Inspect image
+          run: |
+            docker buildx imagetools inspect ${{ env.REGISTRY_IMAGE }}:${{ env.REGISTRY_TAG }}
