@@ -9,6 +9,7 @@ RUN cargo install sqlx-cli
 WORKDIR /songbird
 COPY ./ .
 ENV DATABASE_URL="sqlite:db/database.sqlite"
+ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 RUN mkdir db
 RUN sqlx database setup
 RUN cargo build --release
