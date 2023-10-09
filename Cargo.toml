@@ -10,16 +10,16 @@ songbird = { version = ">=0.3.2", features = ["yt-dlp"] }
 tracing = ">=0.1"
 tracing-subscriber = ">=0.2"
 tracing-futures = ">=0.2"
-dotenv = "0.15.0"
-regex = "1.7.3"
+dotenv = ">=0.15.0"
+regex = ">=1.7.3"
 sqlx = { version = ">=0.6.2", features = [
     "runtime-tokio-native-tls",
     "sqlite",
     "chrono",
     "macros",
 ] }
-rand = "0.8.5"
-edit-distance = "2.1.0"
+rand = ">=0.8.5"
+edit-distance = ">=2.1.0"
 
 [dependencies.serenity]
 version = ">=0.11.5"
