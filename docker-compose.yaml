@@ -1,7 +1,7 @@
 version: '3'
 services:
   songbird-trivia:
-    image: ghcr.io/qdlmcfresh/songbird-trivia:main
+    image: ghcr.io/qdlmcfresh/songbird-trivia:latest
     container_name: songbird-trivia
     restart: unless-stopped
     env_file: .env

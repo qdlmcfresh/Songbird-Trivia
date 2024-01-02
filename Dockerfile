@@ -13,10 +13,10 @@ RUN mkdir db
 RUN sqlx database setup
 RUN cargo build --release
 
-FROM debian:bullseye-slim
+FROM debian:bookworm-slim
 RUN export DEBIAN_FRONTEND=noninteractive
 RUN apt update && apt upgrade -y
-RUN apt install -y --no-install-recommends libopus-dev libssl-dev libssl-dev ffmpeg pkg-config openssl ca-certificates
+RUN apt install -y --no-install-recommends libopus-dev libssl-dev ffmpeg pkg-config openssl ca-certificates
 
 COPY --from=builder /songbird/target/release/songbird-trivia /usr/local/bin/songbird-trivia
 COPY --from=builder /songbird/migrations /project/migrations
